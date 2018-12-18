@@ -1,9 +1,9 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
-import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
@@ -38,9 +38,9 @@ abstract class NodeMembershipSpec
 
       runOn(first, second) {
         cluster.join(first)
-        awaitAssert(clusterView.members.size must be(2))
+        awaitAssert(clusterView.members.size should ===(2))
         assertMembers(clusterView.members, first, second)
-        awaitAssert(clusterView.members.map(_.status) must be(Set(MemberStatus.Up)))
+        awaitAssert(clusterView.members.map(_.status) should ===(Set(MemberStatus.Up)))
       }
 
       enterBarrier("after-1")
@@ -52,11 +52,24 @@ abstract class NodeMembershipSpec
         cluster.join(first)
       }
 
-      awaitAssert(clusterView.members.size must be(3))
+      awaitAssert(clusterView.members.size should ===(3))
       assertMembers(clusterView.members, first, second, third)
-      awaitAssert(clusterView.members.map(_.status) must be(Set(MemberStatus.Up)))
+      awaitAssert(clusterView.members.map(_.status) should ===(Set(MemberStatus.Up)))
 
       enterBarrier("after-2")
+    }
+
+    "correct member age" taggedAs LongRunningTest in {
+      val firstMember = clusterView.members.find(_.address == address(first)).get
+      val secondMember = clusterView.members.find(_.address == address(second)).get
+      val thirdMember = clusterView.members.find(_.address == address(third)).get
+      firstMember.isOlderThan(thirdMember) should ===(true)
+      thirdMember.isOlderThan(firstMember) should ===(false)
+      secondMember.isOlderThan(thirdMember) should ===(true)
+      thirdMember.isOlderThan(secondMember) should ===(false)
+
+      enterBarrier("after-3")
+
     }
   }
 }

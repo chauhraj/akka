@@ -1,117 +1,105 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.contrib.pattern;
 
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
+import java.util.concurrent.TimeUnit;
+
+import akka.actor.*;
+import akka.testkit.AkkaJUnitActorSystemResource;
+
+import org.junit.ClassRule;
 import org.junit.Test;
 
+import org.scalatest.junit.JUnitSuite;
 import scala.concurrent.duration.Duration;
-import scala.concurrent.duration.FiniteDuration;
-import akka.actor.Actor;
-import akka.actor.ActorRef;
-import akka.actor.ActorSystem;
-import akka.actor.FSM;
-import akka.actor.Props;
-import akka.actor.UntypedActor;
-import akka.actor.UntypedActorFactory;
 import akka.testkit.TestProbe;
 
 //#import
 import akka.contrib.pattern.ReliableProxy;
+
+
 //#import
 
-public class ReliableProxyTest {
+public class ReliableProxyTest extends JUnitSuite {
 
-  private static ActorSystem system;
+  @ClassRule
+  public static AkkaJUnitActorSystemResource actorSystemResource =
+          new AkkaJUnitActorSystemResource("ReliableProxyTest");
 
-  @BeforeClass
-  public static void setup() {
-    system = ActorSystem.create();
+  private final ActorSystem system = actorSystemResource.getSystem();
+
+  static//#demo-proxy
+  public class ProxyParent extends AbstractActor {
+    private final ActorRef proxy;
+
+    public ProxyParent(ActorPath targetPath) {
+      proxy = getContext().actorOf(
+          ReliableProxy.props(targetPath,
+              Duration.create(100, TimeUnit.MILLISECONDS)));
+    }
+
+    @Override
+    public Receive createReceive() {
+      return receiveBuilder()
+        .matchEquals("hello", m -> {
+          proxy.tell("world!", self());
+        })
+        .build();
+    }
   }
 
-  @AfterClass
-  public static void teardown() {
-    system.shutdown();
+  //#demo-proxy
+
+  static//#demo-transition
+  public class ProxyTransitionParent extends AbstractActor {
+    private final ActorRef proxy;
+    private ActorRef client = null;
+
+    public ProxyTransitionParent(ActorPath targetPath) {
+      proxy = getContext().actorOf(
+          ReliableProxy.props(targetPath,
+              Duration.create(100, TimeUnit.MILLISECONDS)));
+      proxy.tell(new FSM.SubscribeTransitionCallBack(getSelf()), getSelf());
+    }
+
+    @Override
+    public Receive createReceive() {
+      return receiveBuilder()
+        .matchEquals("hello", message -> {
+          proxy.tell("world!", self());
+          client = sender();
+        })
+        .matchUnchecked(FSM.CurrentState.class, (FSM.CurrentState<ReliableProxy.State> state) -> {
+          // get initial state
+        })
+        .matchUnchecked(FSM.Transition.class, (FSM.Transition<ReliableProxy.State> transition) -> {
+          assert transition.fsmRef().equals(proxy);
+          if (transition.from().equals(ReliableProxy.active()) &&
+            transition.to().equals(ReliableProxy.idle())) {
+            client.tell("done", self());
+          }
+        })
+        .build();
+    }
   }
+
+  //#demo-transition
 
   @Test
   public void demonstrateUsage() {
     final TestProbe probe = TestProbe.apply(system);
     final ActorRef target = probe.ref();
-    final ActorRef parent = system.actorOf(new Props(new UntypedActorFactory() {
-      private static final long serialVersionUID = 1L;
-
-      public Actor create() {
-        return new UntypedActor() {
-
-          //#demo-proxy
-          final ActorRef proxy = getContext().actorOf(
-              new Props(new UntypedActorFactory() {
-                public Actor create() {
-                  final FiniteDuration retry = Duration.create(100, "millis");
-                  return new ReliableProxy(target, retry);
-                }
-              }));
-
-          public void onReceive(Object msg) {
-            if ("hello".equals(msg)) {
-              proxy.tell("world!", getSelf());
-            }
-          }
-          //#demo-proxy
-        };
-      }
-    }));
+    final ActorRef parent = system.actorOf(Props.create(ProxyParent.class, target.path()));
     parent.tell("hello", null);
     probe.expectMsg("world!");
   }
-  
+
   @Test
   public void demonstrateTransitions() {
-    final ActorRef target = system.deadLetters();
-    final ActorRef parent = system.actorOf(new Props(new UntypedActorFactory() {
-      private static final long serialVersionUID = 1L;
-
-      public Actor create() {
-        return new UntypedActor() {
-
-          //#demo-transition
-          final ActorRef proxy = getContext().actorOf(
-              new Props(new UntypedActorFactory() {
-                public Actor create() {
-                  final FiniteDuration retry = Duration.create(100, "millis");
-                  return new ReliableProxy(target, retry);
-                }
-              }));
-          ActorRef client = null;
-          
-          {
-            proxy.tell(new FSM.SubscribeTransitionCallBack(getSelf()), getSelf());
-          }
-
-          public void onReceive(Object msg) {
-            if ("hello".equals(msg)) {
-              proxy.tell("world!", getSelf());
-              client = getSender();
-            } else if (msg instanceof FSM.CurrentState<?>) {
-              // get initial state
-            } else if (msg instanceof FSM.Transition<?>) {
-              @SuppressWarnings("unchecked")
-              final FSM.Transition<ReliableProxy.State> transition =
-                  (FSM.Transition<ReliableProxy.State>) msg;
-              assert transition.fsmRef().equals(proxy);
-              if (transition.to().equals(ReliableProxy.idle())) {
-                client.tell("done", getSelf());
-              }
-            }
-          }
-          //#demo-transition
-        };
-      }
-    }));
+    final ActorRef target = TestProbe.apply(system).ref();
+    final ActorRef parent = system.actorOf(Props.create(ProxyTransitionParent.class, target.path()));
     final TestProbe probe = TestProbe.apply(system);
     parent.tell("hello", probe.ref());
     probe.expectMsg("done");

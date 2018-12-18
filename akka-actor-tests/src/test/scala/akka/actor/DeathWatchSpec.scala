@@ -1,9 +1,10 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.actor
 
+import akka.actor.Props.EmptyActor
 import language.postfixOps
 import akka.dispatch.sysmsg.{ DeathWatchNotification, Failed }
 import akka.pattern.ask
@@ -11,30 +12,68 @@ import akka.testkit._
 import scala.concurrent.duration._
 import scala.concurrent.Await
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class LocalDeathWatchSpec extends AkkaSpec with ImplicitSender with DefaultTimeout with DeathWatchSpec
+class LocalDeathWatchSpec extends AkkaSpec("""
+  akka.actor.serialize-messages = on
+  """) with ImplicitSender with DefaultTimeout with DeathWatchSpec
 
 object DeathWatchSpec {
-  def props(target: ActorRef, testActor: ActorRef) = Props(new Actor {
+  class Watcher(target: ActorRef, testActor: ActorRef) extends Actor {
     context.watch(target)
     def receive = {
       case t: Terminated ⇒ testActor forward WrappedTerminated(t)
       case x             ⇒ testActor forward x
     }
-  })
+  }
+
+  def props(target: ActorRef, testActor: ActorRef) =
+    Props(classOf[Watcher], target, testActor)
+
+  class EmptyWatcher(target: ActorRef) extends Actor {
+    context.watch(target)
+    def receive = Actor.emptyBehavior
+  }
+
+  class NKOTBWatcher(testActor: ActorRef) extends Actor {
+    def receive = {
+      case "NKOTB" ⇒
+        val currentKid = context.watch(context.actorOf(Props(new Actor { def receive = { case "NKOTB" ⇒ context stop self } }), "kid"))
+        currentKid forward "NKOTB"
+        context become {
+          case Terminated(`currentKid`) ⇒
+            testActor ! "GREEN"
+            context unbecome
+        }
+    }
+  }
+
+  class WUWatcher extends Actor {
+    def receive = {
+      case W(ref) ⇒ context watch ref
+      case U(ref) ⇒ context unwatch ref
+      case Latches(t1: TestLatch, t2: TestLatch) ⇒
+        t1.countDown()
+        Await.ready(t2, 3.seconds)
+    }
+  }
 
   /**
    * Forwarding `Terminated` to non-watching testActor is not possible,
    * and therefore the `Terminated` message is wrapped.
    */
-  case class WrappedTerminated(t: Terminated)
+  final case class WrappedTerminated(t: Terminated)
+
+  final case class W(ref: ActorRef)
+  final case class U(ref: ActorRef)
+  final case class FF(fail: Failed)
+
+  final case class Latches(t1: TestLatch, t2: TestLatch) extends NoSerializationVerificationNeeded
 }
 
 trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout ⇒
 
   import DeathWatchSpec._
 
-  lazy val supervisor = system.actorOf(Props(new Supervisor(SupervisorStrategy.defaultStrategy)), "watchers")
+  lazy val supervisor = system.actorOf(Props(classOf[Supervisor], SupervisorStrategy.defaultStrategy), "watchers")
 
   def startWatching(target: ActorRef) = Await.result((supervisor ? props(target, testActor)).mapTo[ActorRef], 3 seconds)
 
@@ -84,10 +123,10 @@ trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout �
         context.watch(terminal)
         context.unwatch(terminal)
         def receive = {
-          case "ping"        ⇒ sender ! "pong"
+          case "ping"        ⇒ sender() ! "pong"
           case t: Terminated ⇒ testActor ! WrappedTerminated(t)
         }
-      }))
+      }).withDeploy(Deploy.local))
 
       monitor2 ! "ping"
 
@@ -107,18 +146,18 @@ trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout �
       filterException[ActorKilledException] {
         val supervisor = system.actorOf(Props(new Supervisor(
           OneForOneStrategy(maxNrOfRetries = 2)(List(classOf[Exception])))))
-        val terminalProps = Props(new Actor { def receive = { case x ⇒ sender ! x } })
+        val terminalProps = TestActors.echoActorProps
         val terminal = Await.result((supervisor ? terminalProps).mapTo[ActorRef], timeout.duration)
 
         val monitor = startWatching(terminal)
 
         terminal ! Kill
         terminal ! Kill
-        Await.result(terminal ? "foo", timeout.duration) must be === "foo"
+        Await.result(terminal ? "foo", timeout.duration) should ===("foo")
         terminal ! Kill
 
         expectTerminationOf(terminal)
-        terminal.isTerminated must be === true
+        terminal.isTerminated should ===(true)
 
         system.stop(supervisor)
       }
@@ -126,20 +165,16 @@ trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout �
 
     "fail a monitor which does not handle Terminated()" in {
       filterEvents(EventFilter[ActorKilledException](), EventFilter[DeathPactException]()) {
-        case class FF(fail: Failed)
         val strategy = new OneForOneStrategy()(SupervisorStrategy.defaultStrategy.decider) {
           override def handleFailure(context: ActorContext, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]) = {
             testActor.tell(FF(Failed(child, cause, 0)), child)
             super.handleFailure(context, child, cause, stats, children)
           }
         }
-        val supervisor = system.actorOf(Props(new Supervisor(strategy)))
+        val supervisor = system.actorOf(Props(new Supervisor(strategy)).withDeploy(Deploy.local))
 
         val failed = Await.result((supervisor ? Props.empty).mapTo[ActorRef], timeout.duration)
-        val brother = Await.result((supervisor ? Props(new Actor {
-          context.watch(failed)
-          def receive = Actor.emptyBehavior
-        })).mapTo[ActorRef], timeout.duration)
+        val brother = Await.result((supervisor ? Props(classOf[EmptyWatcher], failed)).mapTo[ActorRef], timeout.duration)
 
         startWatching(brother)
 
@@ -149,24 +184,13 @@ trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout �
           case FF(Failed(_, DeathPactException(`failed`), _)) if lastSender eq brother ⇒ 2
           case WrappedTerminated(Terminated(`brother`))                                ⇒ 3
         }
-        testActor.isTerminated must not be true
-        result must be(Seq(1, 2, 3))
+        testActor.isTerminated should not be true
+        result should ===(Seq(1, 2, 3))
       }
     }
 
     "be able to watch a child with the same name after the old died" in {
-      val parent = system.actorOf(Props(new Actor {
-        def receive = {
-          case "NKOTB" ⇒
-            val currentKid = context.watch(context.actorOf(Props(new Actor { def receive = { case "NKOTB" ⇒ context stop self } }), "kid"))
-            currentKid forward "NKOTB"
-            context become {
-              case Terminated(`currentKid`) ⇒
-                testActor ! "GREEN"
-                context unbecome
-            }
-        }
-      }))
+      val parent = system.actorOf(Props(classOf[NKOTBWatcher], testActor).withDeploy(Deploy.local))
 
       parent ! "NKOTB"
       expectMsg("GREEN")
@@ -175,7 +199,7 @@ trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout �
     }
 
     "only notify when watching" in {
-      val subject = system.actorOf(Props(new Actor { def receive = Actor.emptyBehavior }))
+      val subject = system.actorOf(Props[EmptyActor]())
 
       testActor.asInstanceOf[InternalActorRef]
         .sendSystemMessage(DeathWatchNotification(subject, existenceConfirmed = true, addressTerminated = false))
@@ -185,23 +209,11 @@ trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout �
     }
 
     "discard Terminated when unwatched between sysmsg and processing" in {
-      case class W(ref: ActorRef)
-      case class U(ref: ActorRef)
-      class Watcher extends Actor {
-        def receive = {
-          case W(ref) ⇒ context watch ref
-          case U(ref) ⇒ context unwatch ref
-          case (t1: TestLatch, t2: TestLatch) ⇒
-            t1.countDown()
-            Await.ready(t2, 3.seconds)
-        }
-      }
-
       val t1, t2 = TestLatch()
-      val w = system.actorOf(Props(new Watcher), "myDearWatcher")
+      val w = system.actorOf(Props[WUWatcher]().withDeploy(Deploy.local), "myDearWatcher")
       val p = TestProbe()
       w ! W(p.ref)
-      w ! ((t1, t2))
+      w ! Latches(t1, t2)
       Await.ready(t1, 3.seconds)
       watch(p.ref)
       system stop p.ref
@@ -209,7 +221,7 @@ trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout �
       w ! U(p.ref)
       t2.countDown()
       /*
-       * now the Watcher will
+       * now the WUWatcher will
        * - process the DeathWatchNotification and enqueue Terminated
        * - process the unwatch command
        * - process the Terminated

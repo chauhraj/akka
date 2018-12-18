@@ -1,15 +1,15 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
-import scala.collection.immutable.SortedSet
-import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
 import akka.actor.Props
 import akka.actor.Actor
+import akka.actor.Deploy
 
 object MembershipChangeListenerUpMultiJvmSpec extends MultiNodeConfig {
   val first = role("first")
@@ -49,7 +49,7 @@ abstract class MembershipChangeListenerUpSpec
                 latch.countDown()
             case _ ⇒ // ignore
           }
-        })), classOf[MemberEvent])
+        }).withDeploy(Deploy.local)), classOf[MemberEvent])
         enterBarrier("listener-1-registered")
         cluster.join(first)
         latch.await
@@ -76,7 +76,7 @@ abstract class MembershipChangeListenerUpSpec
               latch.countDown()
           case _ ⇒ // ignore
         }
-      })), classOf[MemberEvent])
+      }).withDeploy(Deploy.local)), classOf[MemberEvent])
       enterBarrier("listener-2-registered")
 
       runOn(third) {

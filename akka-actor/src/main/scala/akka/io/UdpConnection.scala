@@ -1,26 +1,31 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.io
 
-import akka.actor.{ Actor, ActorLogging, ActorRef }
-import akka.io.SelectionHandler._
-import akka.io.UdpConnected._
-import akka.util.ByteString
+import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SelectionKey._
+
 import scala.annotation.tailrec
 import scala.util.control.NonFatal
+import akka.actor.{ Actor, ActorLogging, ActorRef }
+import akka.dispatch.{ RequiresMessageQueue, UnboundedMessageQueueSemantics }
+import akka.util.{ ByteString, unused }
+import akka.io.SelectionHandler._
+import akka.io.UdpConnected._
 
 /**
  * INTERNAL API
  */
-private[io] class UdpConnection(val udpConn: UdpConnectedExt,
-                                val commander: ActorRef,
-                                val connect: Connect) extends Actor with ActorLogging {
-
-  def selector: ActorRef = context.parent
+private[io] class UdpConnection(
+  udpConn:         UdpConnectedExt,
+  channelRegistry: ChannelRegistry,
+  commander:       ActorRef,
+  connect:         Connect)
+  extends Actor with ActorLogging with RequiresMessageQueue[UnboundedMessageQueueSemantics] {
 
   import connect._
   import udpConn._
@@ -30,60 +35,77 @@ private[io] class UdpConnection(val udpConn: UdpConnectedExt,
   def writePending = pendingSend ne null
 
   context.watch(handler) // sign death pact
-  val channel = {
-    val datagramChannel = DatagramChannel.open
-    datagramChannel.configureBlocking(false)
-    val socket = datagramChannel.socket
-    options.foreach(_.beforeDatagramBind(socket))
-    try {
-      localAddress foreach socket.bind
-      datagramChannel.connect(remoteAddress)
-    } catch {
-      case NonFatal(e) ⇒
-        log.error(e, "Failure while connecting UDP channel to remote address [{}] local address [{}]",
-          remoteAddress, localAddress.map { _.toString }.getOrElse("undefined"))
-        commander ! CommandFailed(connect)
-        context.stop(self)
+  var channel: DatagramChannel = null
+
+  if (remoteAddress.isUnresolved) {
+    Dns.resolve(remoteAddress.getHostName)(context.system, self) match {
+      case Some(r) ⇒
+        doConnect(new InetSocketAddress(r.addr, remoteAddress.getPort))
+      case None ⇒
+        context.become(resolving(), discardOld = true)
     }
-    datagramChannel
+  } else {
+    doConnect(remoteAddress)
   }
-  selector ! RegisterChannel(channel, OP_READ)
-  log.debug("Successfully connected to [{}]", remoteAddress)
+
+  def resolving(): Receive = {
+    case r: Dns.Resolved ⇒
+      reportConnectFailure {
+        doConnect(new InetSocketAddress(r.addr, remoteAddress.getPort))
+      }
+  }
+
+  def doConnect(@unused address: InetSocketAddress): Unit = {
+    reportConnectFailure {
+      channel = DatagramChannel.open
+      channel.configureBlocking(false)
+      val socket = channel.socket
+      options.foreach(_.beforeDatagramBind(socket))
+      localAddress foreach socket.bind
+      channel.connect(remoteAddress)
+      channelRegistry.register(channel, OP_READ)
+    }
+    log.debug("Successfully connected to [{}]", remoteAddress)
+  }
 
   def receive = {
-    case ChannelRegistered ⇒
+    case registration: ChannelRegistration ⇒
+      options.foreach {
+        case v2: Inet.SocketOptionV2 ⇒ v2.afterConnect(channel.socket)
+        case _                       ⇒
+      }
       commander ! Connected
-      context.become(connected, discardOld = true)
+      context.become(connected(registration), discardOld = true)
   }
 
-  def connected: Receive = {
-    case StopReading     ⇒ selector ! DisableReadInterest
-    case ResumeReading   ⇒ selector ! ReadInterest
-    case ChannelReadable ⇒ doRead(handler)
+  def connected(registration: ChannelRegistration): Receive = {
+    case SuspendReading  ⇒ registration.disableInterest(OP_READ)
+    case ResumeReading   ⇒ registration.enableInterest(OP_READ)
+    case ChannelReadable ⇒ doRead(registration, handler)
 
-    case Close ⇒
+    case Disconnect ⇒
       log.debug("Closing UDP connection to [{}]", remoteAddress)
       channel.close()
-      sender ! Disconnected
+      sender() ! Disconnected
       log.debug("Connection closed to [{}], stopping listener", remoteAddress)
       context.stop(self)
 
     case send: Send if writePending ⇒
       if (TraceLogging) log.debug("Dropping write because queue is full")
-      sender ! CommandFailed(send)
+      sender() ! CommandFailed(send)
 
     case send: Send if send.payload.isEmpty ⇒
       if (send.wantsAck)
-        sender ! send.ack
+        sender() ! send.ack
 
     case send: Send ⇒
-      pendingSend = (send, sender)
-      selector ! WriteInterest
+      pendingSend = (send, sender())
+      registration.enableInterest(OP_WRITE)
 
     case ChannelWritable ⇒ doWrite()
   }
 
-  def doRead(handler: ActorRef): Unit = {
+  def doRead(registration: ChannelRegistration, handler: ActorRef): Unit = {
     @tailrec def innerRead(readsLeft: Int, buffer: ByteBuffer): Unit = {
       buffer.clear()
       buffer.limit(DirectBufferSize)
@@ -96,13 +118,12 @@ private[io] class UdpConnection(val udpConn: UdpConnectedExt,
     }
     val buffer = bufferPool.acquire()
     try innerRead(BatchReceiveLimit, buffer) finally {
-      selector ! ReadInterest
+      registration.enableInterest(OP_READ)
       bufferPool.release(buffer)
     }
   }
 
   final def doWrite(): Unit = {
-
     val buffer = udpConn.bufferPool.acquire()
     try {
       val (send, commander) = pendingSend
@@ -119,17 +140,27 @@ private[io] class UdpConnection(val udpConn: UdpConnectedExt,
       udpConn.bufferPool.release(buffer)
       pendingSend = null
     }
-
   }
 
-  override def postStop() {
+  override def postStop(): Unit =
     if (channel.isOpen) {
       log.debug("Closing DatagramChannel after being stopped")
       try channel.close()
       catch {
-        case NonFatal(e) ⇒ log.error(e, "Error closing DatagramChannel")
+        case NonFatal(e) ⇒ log.debug("Error closing DatagramChannel: {}", e)
       }
     }
-  }
 
+  private def reportConnectFailure(thunk: ⇒ Unit): Unit = {
+    try {
+      thunk
+    } catch {
+      case NonFatal(e) ⇒
+        log.debug(
+          "Failure while connecting UDP channel to remote address [{}] local address [{}]: {}",
+          remoteAddress, localAddress.getOrElse("undefined"), e)
+        commander ! CommandFailed(connect)
+        context.stop(self)
+    }
+  }
 }

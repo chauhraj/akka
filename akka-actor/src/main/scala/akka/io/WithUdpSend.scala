@@ -1,12 +1,16 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.io
 
+import java.net.InetSocketAddress
+import java.nio.channels.{ SelectionKey, DatagramChannel }
 import akka.actor.{ ActorRef, ActorLogging, Actor }
 import akka.io.Udp.{ CommandFailed, Send }
 import akka.io.SelectionHandler._
-import java.nio.channels.DatagramChannel
+
+import scala.util.control.NonFatal
 
 /**
  * INTERNAL API
@@ -14,41 +18,64 @@ import java.nio.channels.DatagramChannel
 private[io] trait WithUdpSend {
   me: Actor with ActorLogging ⇒
 
-  var pendingSend: Send = null
-  var pendingCommander: ActorRef = null
+  private var pendingSend: Send = null
+  private var pendingCommander: ActorRef = null
   // If send fails first, we allow a second go after selected writable, but no more. This flag signals that
   // pending send was already tried once.
-  var retriedSend = false
-  def hasWritePending = pendingSend ne null
+  private var retriedSend = false
+  private def hasWritePending = pendingSend ne null
 
-  def selector: ActorRef
   def channel: DatagramChannel
   def udp: UdpExt
   val settings = udp.settings
 
   import settings._
 
-  def sendHandlers: Receive = {
-
+  def sendHandlers(registration: ChannelRegistration): Receive = {
     case send: Send if hasWritePending ⇒
       if (TraceLogging) log.debug("Dropping write because queue is full")
-      sender ! CommandFailed(send)
+      sender() ! CommandFailed(send)
 
     case send: Send if send.payload.isEmpty ⇒
       if (send.wantsAck)
-        sender ! send.ack
+        sender() ! send.ack
 
     case send: Send ⇒
       pendingSend = send
-      pendingCommander = sender
-      doSend()
+      pendingCommander = sender()
+      if (send.target.isUnresolved) {
+        Dns.resolve(send.target.getHostName)(context.system, self) match {
+          case Some(r) ⇒
+            try {
+              pendingSend = pendingSend.copy(target = new InetSocketAddress(r.addr, pendingSend.target.getPort))
+              doSend(registration)
+            } catch {
+              case NonFatal(e) ⇒
+                sender() ! CommandFailed(send)
+                log.debug(
+                  "Failure while sending UDP datagram to remote address [{}]: {}",
+                  send.target, e)
+                retriedSend = false
+                pendingSend = null
+                pendingCommander = null
+            }
+          case None ⇒
+            sender() ! CommandFailed(send)
+            log.debug(
+              "Name resolution failed for remote address [{}]",
+              send.target)
+            retriedSend = false
+            pendingSend = null
+            pendingCommander = null
+        }
+      } else {
+        doSend(registration)
+      }
 
-    case ChannelWritable ⇒ if (hasWritePending) doSend()
-
+    case ChannelWritable ⇒ if (hasWritePending) doSend(registration)
   }
 
-  final def doSend(): Unit = {
-
+  private def doSend(registration: ChannelRegistration): Unit = {
     val buffer = udp.bufferPool.acquire()
     try {
       buffer.clear()
@@ -65,7 +92,7 @@ private[io] trait WithUdpSend {
           pendingSend = null
           pendingCommander = null
         } else {
-          selector ! WriteInterest
+          registration.enableInterest(SelectionKey.OP_WRITE)
           retriedSend = true
         }
       } else {
@@ -74,10 +101,8 @@ private[io] trait WithUdpSend {
         pendingSend = null
         pendingCommander = null
       }
-
     } finally {
       udp.bufferPool.release(buffer)
     }
-
   }
 }

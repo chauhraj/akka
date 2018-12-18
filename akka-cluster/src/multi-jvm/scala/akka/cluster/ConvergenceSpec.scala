@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import language.postfixOps
@@ -12,14 +13,17 @@ import akka.testkit._
 import scala.concurrent.duration._
 import akka.actor.Address
 
-case class ConvergenceMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
+final case class ConvergenceMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
   val first = role("first")
   val second = role("second")
   val third = role("third")
   val fourth = role("fourth")
 
   commonConfig(debugConfig(on = false).
-    withFallback(ConfigFactory.parseString("akka.cluster.failure-detector.threshold = 4")).
+    withFallback(ConfigFactory.parseString("""
+      akka.cluster.failure-detector.threshold = 4
+      akka.cluster.allow-weakly-up-members = off
+      """)).
     withFallback(MultiNodeClusterSpec.clusterConfig(failureDetectorPuppet)))
 }
 
@@ -61,7 +65,7 @@ abstract class ConvergenceSpec(multiNodeConfig: ConvergenceMultiNodeConfig)
 
       runOn(first) {
         // kill 'third' node
-        testConductor.shutdown(third, 0).await
+        testConductor.exit(third, 0).await
         markNodeAsUnavailable(thirdAddress)
       }
 
@@ -69,13 +73,12 @@ abstract class ConvergenceSpec(multiNodeConfig: ConvergenceMultiNodeConfig)
 
         within(28 seconds) {
           // third becomes unreachable
-          awaitAssert(clusterView.unreachableMembers.size must be(1))
-          awaitAssert(clusterView.members.size must be(2))
-          awaitAssert(clusterView.members.map(_.status) must be(Set(MemberStatus.Up)))
+          awaitAssert(clusterView.unreachableMembers.size should ===(1))
           awaitSeenSameState(first, second)
           // still one unreachable
-          clusterView.unreachableMembers.size must be(1)
-          clusterView.unreachableMembers.head.address must be(thirdAddress)
+          clusterView.unreachableMembers.size should ===(1)
+          clusterView.unreachableMembers.head.address should ===(thirdAddress)
+          clusterView.members.size should ===(3)
 
         }
       }
@@ -96,11 +99,11 @@ abstract class ConvergenceSpec(multiNodeConfig: ConvergenceMultiNodeConfig)
 
       runOn(first, second, fourth) {
         for (n ← 1 to 5) {
-          awaitAssert(clusterView.members.size must be(2))
+          awaitAssert(clusterView.members.size should ===(4))
           awaitSeenSameState(first, second, fourth)
-          memberStatus(first) must be(Some(MemberStatus.Up))
-          memberStatus(second) must be(Some(MemberStatus.Up))
-          memberStatus(fourth) must be(None)
+          memberStatus(first) should ===(Some(MemberStatus.Up))
+          memberStatus(second) should ===(Some(MemberStatus.Up))
+          memberStatus(fourth) should ===(Some(MemberStatus.Joining))
           // wait and then check again
           Thread.sleep(1.second.dilated.toMillis)
         }

@@ -1,32 +1,30 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.camel
 
-import language.postfixOps
-
 import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.Matchers
 import scala.concurrent.{ Promise, Await, Future }
 import scala.collection.immutable
 import akka.camel.TestSupport.NonSharedCamelSystem
 import akka.actor.{ ActorRef, Props, Actor }
-import akka.routing.BroadcastRouter
+import akka.routing.BroadcastGroup
 import scala.concurrent.duration._
 import akka.testkit._
 import akka.util.Timeout
 import org.apache.camel.model.RouteDefinition
 import org.apache.camel.builder.Builder
+import akka.actor.ActorLogging
 
 /**
  * A test to concurrently register and de-register consumer and producer endpoints
  */
-class ConcurrentActivationTest extends WordSpec with MustMatchers with NonSharedCamelSystem {
+class ConcurrentActivationTest extends WordSpec with Matchers with NonSharedCamelSystem {
 
   "Activation" must {
     "support concurrent registrations and de-registrations" in {
-      implicit val timeout = Timeout(10 seconds)
-      val timeoutDuration = timeout.duration
       implicit val ec = system.dispatcher
       val number = 10
       val eventFilter = EventFilter.warning(pattern = "received dead letter from .*producerRegistrar.*")
@@ -39,7 +37,7 @@ class ConcurrentActivationTest extends WordSpec with MustMatchers with NonShared
         // future to all the futures of activation and deactivation
         val futureRegistrarLists = promiseRegistrarLists.future
 
-        val ref = system.actorOf(Props(new ConsumerBroadcast(promiseRegistrarLists)), name = "broadcaster")
+        val ref = system.actorOf(Props(classOf[ConsumerBroadcast], promiseRegistrarLists), name = "broadcaster")
         // create the registrars
         ref ! CreateRegistrars(number)
         // send a broadcast to all registrars, so that number * number messages are sent
@@ -58,20 +56,20 @@ class ConcurrentActivationTest extends WordSpec with MustMatchers with NonShared
                 promiseAllRefs.success((activations.flatten, deactivations.flatten))
             }
         }
-        val (activations, deactivations) = Await.result(allRefsFuture, timeoutDuration)
-        // must be the size of the activated activated producers and consumers
-        activations.size must be(2 * number * number)
-        // must be the size of the activated activated producers and consumers
-        deactivations.size must be(2 * number * number)
+        val (activations, deactivations) = Await.result(allRefsFuture, 10.seconds.dilated)
+        // should be the size of the activated activated producers and consumers
+        activations.size should ===(2 * number * number)
+        // should be the size of the activated activated producers and consumers
+        deactivations.size should ===(2 * number * number)
         def partitionNames(refs: immutable.Seq[ActorRef]) = refs.map(_.path.name).partition(_.startsWith("concurrent-test-echo-consumer"))
-        def assertContainsSameElements(lists: (Seq[_], Seq[_])) {
+        def assertContainsSameElements(lists: (Seq[_], Seq[_])): Unit = {
           val (a, b) = lists
-          a.intersect(b).size must be(a.size)
+          a.intersect(b).size should ===(a.size)
         }
         val (activatedConsumerNames, activatedProducerNames) = partitionNames(activations)
         val (deactivatedConsumerNames, deactivatedProducerNames) = partitionNames(deactivations)
-        assertContainsSameElements(activatedConsumerNames -> deactivatedConsumerNames)
-        assertContainsSameElements(activatedProducerNames -> deactivatedProducerNames)
+        assertContainsSameElements(activatedConsumerNames → deactivatedConsumerNames)
+        assertContainsSameElements(activatedProducerNames → deactivatedProducerNames)
       } finally {
         system.eventStream.publish(TestEvent.UnMute(eventFilter))
       }
@@ -87,7 +85,7 @@ class ConsumerBroadcast(promise: Promise[(Future[List[List[ActorRef]]], Future[L
       var allActivationFutures = List[Future[List[ActorRef]]]()
       var allDeactivationFutures = List[Future[List[ActorRef]]]()
 
-      val routees = (1 to number).map { i ⇒
+      val routeePaths = (1 to number).map { i ⇒
         val activationListPromise = Promise[List[ActorRef]]()
         val deactivationListPromise = Promise[List[ActorRef]]()
         val activationListFuture = activationListPromise.future
@@ -95,31 +93,32 @@ class ConsumerBroadcast(promise: Promise[(Future[List[List[ActorRef]]], Future[L
 
         allActivationFutures = allActivationFutures :+ activationListFuture
         allDeactivationFutures = allDeactivationFutures :+ deactivationListFuture
-        context.actorOf(Props(new Registrar(i, number, activationListPromise, deactivationListPromise)), "registrar-" + i)
+        val routee = context.actorOf(Props(classOf[Registrar], i, number, activationListPromise, deactivationListPromise), "registrar-" + i)
+        routee.path.toString
       }
-      promise.success(Future.sequence(allActivationFutures) -> Future.sequence(allDeactivationFutures))
+      promise.success(Future.sequence(allActivationFutures) → Future.sequence(allDeactivationFutures))
 
-      broadcaster = Some(context.actorOf(Props.empty withRouter (BroadcastRouter(routees)), "registrarRouter"))
+      broadcaster = Some(context.actorOf(BroadcastGroup(routeePaths).props(), "registrarRouter"))
     case reg: Any ⇒
       broadcaster.foreach(_.forward(reg))
   }
 }
 
-case class CreateRegistrars(number: Int)
-case class RegisterConsumersAndProducers(endpointUri: String)
-case class DeRegisterConsumersAndProducers()
-case class Activations()
-case class DeActivations()
+final case class CreateRegistrars(number: Int)
+final case class RegisterConsumersAndProducers(endpointUri: String)
+final case class DeRegisterConsumersAndProducers()
+final case class Activations()
+final case class DeActivations()
 
 class Registrar(val start: Int, val number: Int, activationsPromise: Promise[List[ActorRef]],
-                deActivationsPromise: Promise[List[ActorRef]]) extends Actor {
+                deActivationsPromise: Promise[List[ActorRef]]) extends Actor with ActorLogging {
   private var actorRefs = Set[ActorRef]()
   private var activations = Set[Future[ActorRef]]()
   private var deActivations = Set[Future[ActorRef]]()
   private var index = 0
   private val camel = CamelExtension(context.system)
   private implicit val ec = context.dispatcher
-  private implicit val timeout = Timeout(10 seconds)
+  private implicit val timeout = Timeout(10.seconds.dilated(context.system))
 
   def receive = {
     case reg: RegisterConsumersAndProducers ⇒
@@ -134,17 +133,25 @@ class Registrar(val start: Int, val number: Int, activationsPromise: Promise[Lis
     case reg: DeRegisterConsumersAndProducers ⇒
       actorRefs.foreach { aref ⇒
         context.stop(aref)
-        deActivations = deActivations + camel.deactivationFutureFor(aref)
+        val result = camel.deactivationFutureFor(aref)
+        result.failed.foreach {
+          e ⇒ log.error("deactivationFutureFor {} failed: {}", aref, e.getMessage)
+        }
+        deActivations += result
         if (deActivations.size == number * 2) {
           Future.sequence(deActivations.toList) map deActivationsPromise.success
         }
       }
   }
 
-  def add(actor: ⇒ Actor, name: String) {
+  def add(actor: ⇒ Actor, name: String): Unit = {
     val ref = context.actorOf(Props(actor), name)
     actorRefs = actorRefs + ref
-    activations = activations + camel.activationFutureFor(ref)
+    val result = camel.activationFutureFor(ref)
+    result.failed.foreach {
+      e ⇒ log.error("activationFutureFor {} failed: {}", ref, e.getMessage)
+    }
+    activations += result
   }
 }
 
@@ -153,7 +160,7 @@ class EchoConsumer(endpoint: String) extends Actor with Consumer {
   def endpointUri = endpoint
 
   def receive = {
-    case msg: CamelMessage ⇒ sender ! msg
+    case msg: CamelMessage ⇒ sender() ! msg
   }
 
   /**

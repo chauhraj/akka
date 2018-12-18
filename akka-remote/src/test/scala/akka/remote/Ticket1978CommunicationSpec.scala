@@ -1,24 +1,26 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote
 
-import language.postfixOps
+import java.io.ByteArrayOutputStream
+import java.security.NoSuchAlgorithmException
+import java.util.zip.GZIPOutputStream
 
-import akka.testkit._
 import akka.actor._
-import com.typesafe.config._
-import scala.concurrent.Future
-import scala.reflect.classTag
+import akka.event.NoMarkerLogging
 import akka.pattern.ask
-import java.io.File
-import java.security.{ NoSuchAlgorithmException, SecureRandom, PrivilegedAction, AccessController }
-import javax.net.ssl.SSLException
+import akka.remote.Configuration.{ CipherConfig, getCipherConfig }
+import akka.remote.transport.netty.SSLSettings
+import akka.testkit._
 import akka.util.Timeout
-import scala.concurrent.Await
+import com.typesafe.config._
+import scala.concurrent.{ Await, Future }
 import scala.concurrent.duration._
-import akka.event.{ Logging, NoLogging, LoggingAdapter }
-import akka.remote.transport.netty.{ SSLSettings, NettySSLSupport }
+import scala.reflect.classTag
+
+import akka.remote.transport.netty.ConfigSSLEngineProvider
 
 object Configuration {
   // set this in your JAVA_OPTS to see all ssl debug info: "-Djavax.net.debug=ssl,keymanager"
@@ -27,7 +29,7 @@ object Configuration {
   private val keyStore = getClass.getClassLoader.getResource("keystore").getPath
   private val conf = """
     akka {
-      actor.provider = "akka.remote.RemoteActorRefProvider"
+      actor.provider = remote
       test {
         single-expect-default = 10s
         filter-leeway = 10s
@@ -40,13 +42,12 @@ object Configuration {
         hostname = localhost
         port = %d
         security {
-          enable = on
           trust-store = "%s"
           key-store = "%s"
           key-store-password = "changeme"
           key-password = "changeme"
           trust-store-password = "changeme"
-          protocol = "TLSv1"
+          protocol = "TLSv1.2"
           random-number-generator = "%s"
           enabled-algorithms = [%s]
         }
@@ -54,7 +55,8 @@ object Configuration {
     }
                      """
 
-  case class CipherConfig(runTest: Boolean, config: Config, cipher: String, localPort: Int, remotePort: Int)
+  final case class CipherConfig(runTest: Boolean, config: Config, cipher: String, localPort: Int, remotePort: Int,
+                                provider: Option[ConfigSSLEngineProvider])
 
   def getCipherConfig(cipher: String, enabled: String*): CipherConfig = {
     val localPort, remotePort = { val s = new java.net.ServerSocket(0); try s.getLocalPort finally s.close() }
@@ -65,91 +67,102 @@ object Configuration {
       val fullConfig = config.withFallback(AkkaSpec.testConf).withFallback(ConfigFactory.load).getConfig("akka.remote.netty.ssl.security")
       val settings = new SSLSettings(fullConfig)
 
-      val rng = NettySSLSupport.initializeCustomSecureRandom(settings.SSLRandomNumberGenerator, NoLogging)
+      val sslEngineProvider = new ConfigSSLEngineProvider(NoMarkerLogging, settings)
+      val rng = sslEngineProvider.createSecureRandom()
 
       rng.nextInt() // Has to work
-      settings.SSLRandomNumberGenerator foreach {
-        sRng ⇒ rng.getAlgorithm == sRng || (throw new NoSuchAlgorithmException(sRng))
-      }
+      val sRng = settings.SSLRandomNumberGenerator
+      if (rng.getAlgorithm != sRng && sRng != "")
+        throw new NoSuchAlgorithmException(sRng)
 
-      val engine = NettySSLSupport.initializeClientSSL(settings, NoLogging).getEngine
-      val gotAllSupported = enabled.toSet -- engine.getSupportedCipherSuites.toSet
-      val gotAllEnabled = enabled.toSet -- engine.getEnabledCipherSuites.toSet
+      val engine = sslEngineProvider.createClientSSLEngine()
+      val gotAllSupported = enabled.toSet diff engine.getSupportedCipherSuites.toSet
+      val gotAllEnabled = enabled.toSet diff engine.getEnabledCipherSuites.toSet
       gotAllSupported.isEmpty || (throw new IllegalArgumentException("Cipher Suite not supported: " + gotAllSupported))
       gotAllEnabled.isEmpty || (throw new IllegalArgumentException("Cipher Suite not enabled: " + gotAllEnabled))
-      engine.getSupportedProtocols.contains(settings.SSLProtocol.get) ||
-        (throw new IllegalArgumentException("Protocol not supported: " + settings.SSLProtocol.get))
+      engine.getSupportedProtocols.contains(settings.SSLProtocol) ||
+        (throw new IllegalArgumentException("Protocol not supported: " + settings.SSLProtocol))
 
-      CipherConfig(true, config, cipher, localPort, remotePort)
+      CipherConfig(true, config, cipher, localPort, remotePort, Some(sslEngineProvider))
     } catch {
-      case (_: IllegalArgumentException) | (_: NoSuchAlgorithmException) ⇒ CipherConfig(false, AkkaSpec.testConf, cipher, localPort, remotePort) // Cannot match against the message since the message might be localized :S
+      case _: IllegalArgumentException | _: NoSuchAlgorithmException ⇒
+        CipherConfig(false, AkkaSpec.testConf, cipher, localPort, remotePort, None) // Cannot match against the message since the message might be localized :S
     }
   }
 }
 
-import Configuration.{ CipherConfig, getCipherConfig }
-
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class Ticket1978SHA1PRNGSpec extends Ticket1978CommunicationSpec(getCipherConfig("SHA1PRNG", "TLS_RSA_WITH_AES_128_CBC_SHA"))
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class Ticket1978AES128CounterSecureRNGSpec extends Ticket1978CommunicationSpec(getCipherConfig("AES128CounterSecureRNG", "TLS_RSA_WITH_AES_128_CBC_SHA", "TLS_RSA_WITH_AES_256_CBC_SHA"))
-
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class Ticket1978AES256CounterSecureRNGSpec extends Ticket1978CommunicationSpec(getCipherConfig("AES256CounterSecureRNG", "TLS_RSA_WITH_AES_128_CBC_SHA", "TLS_RSA_WITH_AES_256_CBC_SHA"))
-
-/**
- * Both of the <quote>Inet</quote> variants require access to the Internet to access random.org.
- */
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class Ticket1978AES128CounterInetRNGSpec extends Ticket1978CommunicationSpec(getCipherConfig("AES128CounterInetRNG", "TLS_RSA_WITH_AES_128_CBC_SHA"))
-
-/**
- * Both of the <quote>Inet</quote> variants require access to the Internet to access random.org.
- */
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class Ticket1978AES256CounterInetRNGSpec extends Ticket1978CommunicationSpec(getCipherConfig("AES256CounterInetRNG", "TLS_RSA_WITH_AES_256_CBC_SHA"))
-
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class Ticket1978DefaultRNGSecureSpec extends Ticket1978CommunicationSpec(getCipherConfig("", "TLS_RSA_WITH_AES_128_CBC_SHA"))
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class Ticket1978CrappyRSAWithMD5OnlyHereToMakeSureThingsWorkSpec extends Ticket1978CommunicationSpec(getCipherConfig("", "SSL_RSA_WITH_NULL_MD5"))
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class Ticket1978NonExistingRNGSecureSpec extends Ticket1978CommunicationSpec(CipherConfig(false, AkkaSpec.testConf, "NonExistingRNG", 12345, 12346))
+class Ticket1978NonExistingRNGSecureSpec extends Ticket1978CommunicationSpec(CipherConfig(false, AkkaSpec.testConf, "NonExistingRNG", 12345, 12346, None))
 
 abstract class Ticket1978CommunicationSpec(val cipherConfig: CipherConfig) extends AkkaSpec(cipherConfig.config) with ImplicitSender {
 
-  implicit val timeout: Timeout = Timeout(10 seconds)
+  implicit val timeout: Timeout = Timeout(10.seconds)
 
   lazy val other: ActorSystem = ActorSystem(
     "remote-sys",
     ConfigFactory.parseString("akka.remote.netty.ssl.port = " + cipherConfig.remotePort).withFallback(system.settings.config))
 
-  override def afterTermination() {
+  override def afterTermination(): Unit = {
     if (cipherConfig.runTest) {
-      other.shutdown()
-      other.awaitTermination()
+      shutdown(other)
     }
   }
 
+  def preCondition: Boolean = true
+
   ("-") must {
-    if (cipherConfig.runTest) {
-      val ignoreMe = other.actorOf(Props(new Actor { def receive = { case ("ping", x) ⇒ sender ! ((("pong", x), sender)) } }), "echo")
+    if (cipherConfig.runTest && preCondition) {
+      val ignoreMe = other.actorOf(Props(new Actor { def receive = { case ("ping", x) ⇒ sender() ! ((("pong", x), sender())) } }), "echo")
       val otherAddress = other.asInstanceOf[ExtendedActorSystem].provider.asInstanceOf[RemoteActorRefProvider].transport.defaultAddress
 
-      "support tell" in {
+      "generate random" in {
+        val rng = cipherConfig.provider.get.createSecureRandom()
+        val bytes = Array.ofDim[Byte](16)
+        // awaitAssert just in case we are very unlucky to get same sequence more than once
+        awaitAssert {
+          val randomBytes = (1 to 10).map { n ⇒
+            rng.nextBytes(bytes)
+            bytes.toVector
+          }.toSet
+          randomBytes.size should ===(10)
+        }
+      }
+
+      "have random numbers that are not compressable, because then they are not random" in {
+        val provider = new ConfigSSLEngineProvider(system)
+        val rng = provider.createSecureRandom()
+
+        val randomData = new Array[Byte](1024 * 1024)
+        rng.nextBytes(randomData)
+
+        val baos = new ByteArrayOutputStream()
+        val gzipped = new GZIPOutputStream(baos)
+        try gzipped.write(randomData)
+        finally gzipped.close()
+
+        val compressed = baos.toByteArray
+        // random data should not be compressible
+        // Another reproducer of https://doc.akka.io/docs/akka/current/security/2018-08-29-aes-rng.html
+        // with the broken implementation the compressed size was <5k
+        compressed.size should be > randomData.length
+      }
+
+      "support tell" in within(timeout.duration) {
         val here = {
           system.actorSelection(otherAddress.toString + "/user/echo") ! Identify(None)
           expectMsgType[ActorIdentity].ref.get
         }
 
         for (i ← 1 to 1000) here ! (("ping", i))
-        for (i ← 1 to 1000) expectMsgPF(timeout.duration) { case (("pong", i), `testActor`) ⇒ true }
+        for (i ← 1 to 1000) expectMsgPF() { case (("pong", i), `testActor`) ⇒ true }
       }
 
-      "support ask" in {
+      "support ask" in within(timeout.duration) {
         import system.dispatcher
         val here = {
           system.actorSelection(otherAddress.toString + "/user/echo") ! Identify(None)
@@ -157,12 +170,12 @@ abstract class Ticket1978CommunicationSpec(val cipherConfig: CipherConfig) exten
         }
 
         val f = for (i ← 1 to 1000) yield here ? (("ping", i)) mapTo classTag[((String, Int), ActorRef)]
-        Await.result(Future.sequence(f), timeout.duration).map(_._1._1).toSet must be(Set("pong"))
+        Await.result(Future.sequence(f), remaining).map(_._1._1).toSet should ===(Set("pong"))
       }
 
     } else {
-      "not be run when the cipher is not supported by the platform this test is currently being executed on" ignore {
-
+      "not be run when the cipher is not supported by the platform this test is currently being executed on" in {
+        pending
       }
     }
 

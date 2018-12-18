@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.camel
@@ -17,9 +17,8 @@ import scala.concurrent.Await
 import scala.concurrent.duration._
 import org.scalatest._
 import akka.testkit._
-import matchers.MustMatchers
 
-class UntypedProducerTest extends WordSpec with MustMatchers with BeforeAndAfterAll with BeforeAndAfterEach with SharedCamelSystem with GivenWhenThen {
+class UntypedProducerTest extends WordSpec with Matchers with BeforeAndAfterAll with BeforeAndAfterEach with SharedCamelSystem with GivenWhenThen {
   import UntypedProducerTest._
   val timeout = 1 second
   override protected def beforeAll = {
@@ -35,12 +34,12 @@ class UntypedProducerTest extends WordSpec with MustMatchers with BeforeAndAfter
     "produce a message and receive a normal response" in {
       val producer = system.actorOf(Props[SampleUntypedReplyingProducer], name = "sample-untyped-replying-producer")
 
-      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId → "123"))
       val future = producer.ask(message)(timeout)
 
-      val expected = CamelMessage("received test", Map(CamelMessage.MessageExchangeId -> "123"))
+      val expected = CamelMessage("received test", Map(CamelMessage.MessageExchangeId → "123"))
       Await.result(future, timeout) match {
-        case result: CamelMessage ⇒ result must be(expected)
+        case result: CamelMessage ⇒ result should ===(expected)
         case unexpected           ⇒ fail("Actor responded with unexpected message:" + unexpected)
       }
 
@@ -49,14 +48,14 @@ class UntypedProducerTest extends WordSpec with MustMatchers with BeforeAndAfter
     "produce a message and receive a failure response" in {
       val producer = system.actorOf(Props[SampleUntypedReplyingProducer], name = "sample-untyped-replying-producer-failure")
 
-      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId → "123"))
       filterEvents(EventFilter[AkkaCamelException](occurrences = 1)) {
         val future = producer.ask(message)(timeout).failed
 
         Await.result(future, timeout) match {
           case e: AkkaCamelException ⇒
-            e.getMessage must be("failure")
-            e.headers must be(Map(CamelMessage.MessageExchangeId -> "123"))
+            e.getMessage should ===("failure")
+            e.headers should ===(Map(CamelMessage.MessageExchangeId → "123"))
           case unexpected ⇒ fail("Actor responded with unexpected message:" + unexpected)
         }
       }
@@ -80,7 +79,7 @@ class UntypedProducerTest extends WordSpec with MustMatchers with BeforeAndAfter
 
 object UntypedProducerTest {
   class TestRoute extends RouteBuilder {
-    def configure {
+    def configure: Unit = {
       from("direct:forward-test-1").to("mock:mock")
       from("direct:producer-test-1").process(new Processor() {
         def process(exchange: Exchange) = {

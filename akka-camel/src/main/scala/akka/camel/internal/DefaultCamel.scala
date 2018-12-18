@@ -1,6 +1,7 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.camel.internal
 
 import akka.camel.internal.component.{ DurationTypeConverter, ActorComponent }
@@ -15,12 +16,10 @@ import org.apache.camel.ProducerTemplate
 import scala.concurrent.{ Future, ExecutionContext }
 import akka.util.Timeout
 import akka.pattern.ask
-import java.io.InputStream
-import org.apache.camel.model.RouteDefinition
-import akka.actor.{ ExtendedActorSystem, ActorRef, Props, ActorSystem }
+import akka.actor.{ ExtendedActorSystem, ActorRef, Props }
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Creates an instance of the Camel subsystem.
  *
  * @param system is used to create internal actors needed by camel instance.
@@ -30,13 +29,10 @@ import akka.actor.{ ExtendedActorSystem, ActorRef, Props, ActorSystem }
  */
 private[camel] class DefaultCamel(val system: ExtendedActorSystem) extends Camel {
   val supervisor = system.actorOf(Props[CamelSupervisor], "camel-supervisor")
-  /**
-   * For internal use only.
-   */
-  private[camel] implicit val log = Logging(system, "Camel")
+  private[camel] implicit val log = Logging(system, getClass.getName)
 
   lazy val context: DefaultCamelContext = {
-    val ctx = new DefaultCamelContext
+    val ctx = settings.ContextProvider.getContext(system)
     if (!settings.JmxStatistics) ctx.disableJMX()
     ctx.setName(system.name)
     ctx.setStreamCaching(settings.StreamingCache)
@@ -52,7 +48,7 @@ private[camel] class DefaultCamel(val system: ExtendedActorSystem) extends Camel
   /**
    * Starts camel and underlying camel context and template.
    * Only the creator of Camel should start and stop it.
-   * @see akka.camel.DefaultCamel#stop()
+   * @see akka.camel.internal.DefaultCamel#shutdown
    */
   def start(): this.type = {
     context.start()
@@ -66,7 +62,7 @@ private[camel] class DefaultCamel(val system: ExtendedActorSystem) extends Camel
    * Only the creator of Camel should shut it down.
    * There is no need to stop Camel instance, which you get from the CamelExtension, as its lifecycle is bound to the actor system.
    *
-   * @see akka.camel.DefaultCamel#start()
+   * @see akka.camel.internal.DefaultCamel#start
    */
   def shutdown(): Unit = {
     try context.stop() finally {

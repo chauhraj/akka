@@ -1,25 +1,30 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote.testkit
 
 import language.implicitConversions
-import language.postfixOps
 import java.net.{ InetAddress, InetSocketAddress }
-import java.util.concurrent.TimeoutException
-import com.typesafe.config.{ ConfigObject, ConfigFactory, Config }
+
+import com.typesafe.config.{ Config, ConfigFactory, ConfigObject }
+
 import scala.concurrent.{ Await, Awaitable }
 import scala.util.control.NonFatal
 import scala.collection.immutable
 import akka.actor._
 import akka.util.Timeout
-import akka.remote.testconductor.{ TestConductorExt, TestConductor, RoleName }
-import akka.remote.RemoteActorRefProvider
+import akka.remote.testconductor.{ TestConductor, TestConductorExt }
 import akka.testkit._
+import akka.testkit.TestKit
+import akka.testkit.TestEvent._
+
 import scala.concurrent.duration._
 import akka.remote.testconductor.RoleName
 import akka.actor.RootActorPath
 import akka.event.{ Logging, LoggingAdapter }
+import akka.remote.RemoteTransportException
+import org.jboss.netty.channel.ChannelException
 
 /**
  * Configure the role names and participants of the test, including configuration settings.
@@ -43,7 +48,7 @@ abstract class MultiNodeConfig {
    */
   def nodeConfig(roles: RoleName*)(configs: Config*): Unit = {
     val c = configs.reduceLeft(_ withFallback _)
-    _nodeConf ++= roles map { _ -> c }
+    _nodeConf ++= roles map { _ → c }
   }
 
   /**
@@ -55,6 +60,10 @@ abstract class MultiNodeConfig {
       ConfigFactory.parseString("""
         akka.loglevel = DEBUG
         akka.remote {
+          log-received-messages = on
+          log-sent-messages = on
+        }
+        akka.remote.artery {
           log-received-messages = on
           log-sent-messages = on
         }
@@ -80,7 +89,7 @@ abstract class MultiNodeConfig {
   }
 
   def deployOn(role: RoleName, deployment: String): Unit =
-    _deployments += role -> ((_deployments get role getOrElse Vector()) :+ deployment)
+    _deployments += role → ((_deployments get role getOrElse Vector()) :+ deployment)
 
   def deployOnAll(deployment: String): Unit = _allDeploy :+= deployment
 
@@ -96,12 +105,12 @@ abstract class MultiNodeConfig {
     _roles(MultiNodeSpec.selfIndex)
   }
 
-  private[testkit] def config: Config = {
+  private[akka] def config: Config = {
     val transportConfig =
       if (_testTransport) ConfigFactory.parseString(
         """
            akka.remote.netty.tcp.applied-adapters = [trttl, gremlin]
-           akka.remote.retry-gate-closed-for = 1 s
+           akka.remote.artery.advanced.test-mode = on
         """)
       else ConfigFactory.empty
 
@@ -198,15 +207,19 @@ object MultiNodeSpec {
   require(selfIndex >= 0 && selfIndex < maxNodes, "multinode.index is out of bounds: " + selfIndex)
 
   private[testkit] val nodeConfig = mapToConfig(Map(
-    "akka.actor.provider" -> "akka.remote.RemoteActorRefProvider",
-    "akka.remote.netty.tcp.hostname" -> selfName,
-    "akka.remote.netty.tcp.port" -> selfPort))
+    "akka.actor.provider" → "remote",
+    "akka.remote.artery.canonical.hostname" → selfName,
+    "akka.remote.netty.tcp.hostname" → selfName,
+    "akka.remote.netty.tcp.port" → selfPort,
+    "akka.remote.artery.canonical.port" → selfPort))
 
   private[testkit] val baseConfig: Config = ConfigFactory.parseString("""
       akka {
         loggers = ["akka.testkit.TestEventListener"]
         loglevel = "WARNING"
         stdout-loglevel = "WARNING"
+        coordinated-shutdown.terminate-actor-system = off
+        coordinated-shutdown.run-by-jvm-shutdown-hook = off
         actor {
           default-dispatcher {
             executor = "fork-join-executor"
@@ -226,7 +239,8 @@ object MultiNodeSpec {
   }
 
   private def getCallerName(clazz: Class[_]): String = {
-    val s = Thread.currentThread.getStackTrace map (_.getClassName) drop 1 dropWhile (_ matches ".*MultiNodeSpec.?$")
+    val pattern = s"(akka\\.remote\\.testkit\\.MultiNodeSpec.*|akka\\.remote\\.RemotingMultiNodeSpec)"
+    val s = Thread.currentThread.getStackTrace.map(_.getClassName).drop(1).dropWhile(_.matches(pattern))
     val reduced = s.lastIndexWhere(_ == clazz.getName) match {
       case -1 ⇒ s
       case z  ⇒ s drop (z + 1)
@@ -248,37 +262,59 @@ abstract class MultiNodeSpec(val myself: RoleName, _system: ActorSystem, _roles:
 
   import MultiNodeSpec._
 
+  /**
+   * Constructor for using arbitrary logic to create the actor system used in
+   * the multi node spec (the `Config` passed to the creator must be used in
+   * the created actor system for the multi node tests to work)
+   */
+  def this(config: MultiNodeConfig, actorSystemCreator: Config ⇒ ActorSystem) =
+    this(config.myself, actorSystemCreator(ConfigFactory.load(config.config)), config.roles, config.deployments)
+
   def this(config: MultiNodeConfig) =
-    this(config.myself, ActorSystem(MultiNodeSpec.getCallerName(classOf[MultiNodeSpec]), ConfigFactory.load(config.config)),
-      config.roles, config.deployments)
+    this(config, {
+      val name = MultiNodeSpec.getCallerName(classOf[MultiNodeSpec])
+      config ⇒
+        try {
+          ActorSystem(name, config)
+        } catch {
+          // Retry creating the system once as when using port = 0 two systems may try and use the same one.
+          // RTE is for aeron, CE for netty
+          case _: RemoteTransportException ⇒ ActorSystem(name, config)
+          case _: ChannelException         ⇒ ActorSystem(name, config)
+        }
+    })
 
   val log: LoggingAdapter = Logging(system, this.getClass)
 
-  final override def multiNodeSpecBeforeAll {
+  /**
+   * Enrich `.await()` onto all Awaitables, using remaining duration from the innermost
+   * enclosing `within` block or QueryTimeout.
+   */
+  implicit def awaitHelper[T](w: Awaitable[T]): AwaitHelper[T] = new AwaitHelper(w)
+  class AwaitHelper[T](w: Awaitable[T]) {
+    def await: T = Await.result(w, remainingOr(testConductor.Settings.QueryTimeout.duration))
+  }
+
+  final override def multiNodeSpecBeforeAll: Unit = {
     atStartup()
   }
 
-  final override def multiNodeSpecAfterAll {
+  final override def multiNodeSpecAfterAll: Unit = {
     // wait for all nodes to remove themselves before we shut the conductor down
     if (selfIndex == 0) {
       testConductor.removeNode(myself)
       within(testConductor.Settings.BarrierTimeout.duration) {
-        awaitCond {
-          testConductor.getNodes.await.filterNot(_ == myself).isEmpty
-        }
+        awaitCond({
+          // Await.result(testConductor.getNodes, remaining).filterNot(_ == myself).isEmpty
+          testConductor.getNodes.await.forall(_ == myself)
+        }, message = s"Nodes not shutdown: ${testConductor.getNodes.await}")
       }
     }
-    system.shutdown()
-    val shutdownTimeout = 5.seconds.dilated
-    try system.awaitTermination(shutdownTimeout) catch {
-      case _: TimeoutException ⇒
-        val msg = "Failed to stop [%s] within [%s] \n%s".format(system.name, shutdownTimeout,
-          system.asInstanceOf[ActorSystemImpl].printTree)
-        if (verifySystemShutdown) throw new RuntimeException(msg)
-        else system.log.warning(msg)
-    }
+    shutdown(system, duration = shutdownTimeout)
     afterTermination()
   }
+
+  def shutdownTimeout: FiniteDuration = 15.seconds.dilated
 
   /**
    * Override this and return `true` to assert that the
@@ -323,7 +359,7 @@ abstract class MultiNodeSpec(val myself: RoleName, _system: ActorSystem, _roles:
    * been started either in Conductor or Player mode when the constructor of
    * MultiNodeSpec finishes, i.e. do not call the start*() methods yourself!
    */
-  val testConductor: TestConductorExt = TestConductor(system)
+  var testConductor: TestConductorExt = null
 
   /**
    * Execute the given block of code only on the given nodes (names according
@@ -359,66 +395,98 @@ abstract class MultiNodeSpec(val myself: RoleName, _system: ActorSystem, _roles:
    */
   def node(role: RoleName): ActorPath = RootActorPath(testConductor.getAddressFor(role).await)
 
-  /**
-   * Enrich `.await()` onto all Awaitables, using remaining duration from the innermost
-   * enclosing `within` block or QueryTimeout.
-   */
-  implicit def awaitHelper[T](w: Awaitable[T]) = new AwaitHelper(w)
-  class AwaitHelper[T](w: Awaitable[T]) {
-    def await: T = Await.result(w, remainingOr(testConductor.Settings.QueryTimeout.duration))
-  }
+  def muteDeadLetters(messageClasses: Class[_]*)(sys: ActorSystem = system): Unit =
+    if (!sys.log.isDebugEnabled) {
+      def mute(clazz: Class[_]): Unit =
+        sys.eventStream.publish(Mute(DeadLettersFilter(clazz)(occurrences = Int.MaxValue)))
+      if (messageClasses.isEmpty) mute(classOf[AnyRef])
+      else messageClasses foreach mute
+    }
 
   /*
    * Implementation (i.e. wait for start etc.)
    */
 
   private val controllerAddr = new InetSocketAddress(serverName, serverPort)
-  if (selfIndex == 0) {
-    Await.result(testConductor.startController(initialParticipants, myself, controllerAddr),
-      testConductor.Settings.BarrierTimeout.duration)
-  } else {
-    Await.result(testConductor.startClient(myself, controllerAddr),
-      testConductor.Settings.BarrierTimeout.duration)
+
+  protected def attachConductor(tc: TestConductorExt): Unit = {
+    val timeout = tc.Settings.BarrierTimeout.duration
+    val startFuture =
+      if (selfIndex == 0) tc.startController(initialParticipants, myself, controllerAddr)
+      else tc.startClient(myself, controllerAddr)
+    try Await.result(startFuture, timeout)
+    catch {
+      case NonFatal(x) ⇒ throw new RuntimeException("failure while attaching new conductor", x)
+    }
+    testConductor = tc
   }
+
+  attachConductor(TestConductor(system))
 
   // now add deployments, if so desired
 
-  private case class Replacement(tag: String, role: RoleName) {
+  private final case class Replacement(tag: String, role: RoleName) {
     lazy val addr = node(role).address.toString
   }
+
   private val replacements = roles map (r ⇒ Replacement("@" + r.name + "@", r))
-  private val deployer = system.asInstanceOf[ExtendedActorSystem].provider.deployer
-  deployments(myself) foreach { str ⇒
-    val deployString = (str /: replacements) {
-      case (base, r @ Replacement(tag, _)) ⇒
-        base.indexOf(tag) match {
-          case -1 ⇒ base
-          case start ⇒
-            val replaceWith = try
-              r.addr
-            catch {
-              case NonFatal(e) ⇒
-                // might happen if all test cases are ignored (excluded) and
-                // controller node is finished/exited before r.addr is run
-                // on the other nodes
-                val unresolved = "akka://unresolved-replacement-" + r.role.name
-                log.warning(unresolved + " due to: " + e.getMessage)
-                unresolved
-            }
-            base.replace(tag, replaceWith)
-        }
-    }
-    import scala.collection.JavaConverters._
-    ConfigFactory.parseString(deployString).root.asScala foreach {
-      case (key, value: ConfigObject) ⇒ deployer.parseConfig(key, value.toConfig) foreach deployer.deploy
-      case (key, x)                   ⇒ throw new IllegalArgumentException(s"key $key must map to deployment section, not simple value $x")
+
+  protected def injectDeployments(sys: ActorSystem, role: RoleName): Unit = {
+    val deployer = sys.asInstanceOf[ExtendedActorSystem].provider.deployer
+    deployments(role) foreach { str ⇒
+      val deployString = (str /: replacements) {
+        case (base, r @ Replacement(tag, _)) ⇒
+          base.indexOf(tag) match {
+            case -1 ⇒ base
+            case start ⇒
+              val replaceWith = try
+                r.addr
+              catch {
+                case NonFatal(e) ⇒
+                  // might happen if all test cases are ignored (excluded) and
+                  // controller node is finished/exited before r.addr is run
+                  // on the other nodes
+                  val unresolved = "akka://unresolved-replacement-" + r.role.name
+                  log.warning(unresolved + " due to: " + e.getMessage)
+                  unresolved
+              }
+              base.replace(tag, replaceWith)
+          }
+      }
+      import scala.collection.JavaConverters._
+      ConfigFactory.parseString(deployString).root.asScala foreach {
+        case (key, value: ConfigObject) ⇒ deployer.parseConfig(key, value.toConfig) foreach deployer.deploy
+        case (key, x)                   ⇒ throw new IllegalArgumentException(s"key $key must map to deployment section, not simple value $x")
+      }
     }
   }
 
-  // useful to see which jvm is running which role, used by LogRoleReplace utility
-  log.info("Role [{}] started with address [{}]", myself.name,
-    system.asInstanceOf[ExtendedActorSystem].provider.asInstanceOf[RemoteActorRefProvider].transport.defaultAddress)
+  injectDeployments(system, myself)
 
+  protected val myAddress = system.asInstanceOf[ExtendedActorSystem].provider.getDefaultAddress
+
+  // useful to see which jvm is running which role, used by LogRoleReplace utility
+  log.info("Role [{}] started with address [{}]", myself.name, myAddress)
+
+  /**
+   * This method starts a new ActorSystem with the same configuration as the
+   * previous one on the current node, including deployments. It also creates
+   * a new TestConductor client and registers itself with the conductor so
+   * that it is possible to use barriers etc. normally after this method has
+   * been called.
+   *
+   * NOTICE: you MUST start a new system before trying to enter a barrier or
+   * otherwise using the TestConductor after having terminated this node’s
+   * system.
+   */
+  protected def startNewSystem(): ActorSystem = {
+    val config = ConfigFactory.parseString(s"akka.remote.netty.tcp{port=${myAddress.port.get}\nhostname=${myAddress.host.get}}")
+      .withFallback(system.settings.config)
+    val sys = ActorSystem(system.name, config)
+    injectDeployments(sys, myself)
+    attachConductor(TestConductor(sys))
+    sys
+  }
 }
 
 /**
@@ -429,7 +497,7 @@ abstract class MultiNodeSpec(val myself: RoleName, _system: ActorSystem, _roles:
  * Example trait for MultiNodeSpec with ScalaTest
  *
  * {{{
- * trait STMultiNodeSpec extends MultiNodeSpecCallbacks with WordSpec with MustMatchers with BeforeAndAfterAll {
+ * trait STMultiNodeSpec extends MultiNodeSpecCallbacks with WordSpecLike with MustMatchers with BeforeAndAfterAll {
  *   override def beforeAll() = multiNodeSpecBeforeAll()
  *   override def afterAll() = multiNodeSpecAfterAll()
  * }

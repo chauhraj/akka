@@ -1,32 +1,41 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.io
 
 import java.net.Socket
-import java.nio.channels.SocketChannel
-import scala.concurrent.duration._
-import akka.actor.{ Terminated, SupervisorStrategy, Actor, Props }
-import akka.testkit.{ TestProbe, TestActorRef, AkkaSpec }
-import Tcp._
-import akka.testkit.EventFilter
-import akka.io.SelectionHandler._
-import akka.io.TcpListener.{ RegisterIncoming, FailedRegisterIncoming }
-import akka.TestUtils
+import java.nio.channels.{ SelectableChannel, SocketChannel }
+import java.nio.channels.SelectionKey.OP_ACCEPT
 
-class TcpListenerSpec extends AkkaSpec("akka.io.tcp.batch-accept-limit = 2") {
+import scala.concurrent.duration._
+import akka.actor._
+import akka.testkit.{ AkkaSpec, EventFilter, TestActorRef, TestProbe }
+import akka.io.TcpListener.{ FailedRegisterIncoming, RegisterIncoming }
+import akka.io.SelectionHandler._
+import akka.testkit.SocketUtil
+import Tcp._
+import akka.io.TcpListenerSpec.RegisterChannel
+
+class TcpListenerSpec extends AkkaSpec("""
+    akka.io.tcp.batch-accept-limit = 2
+    akka.actor.serialize-creators = on
+    """) {
 
   "A TcpListener" must {
 
-    "register its ServerSocketChannel with its selector" in new TestSetup
+    "register its ServerSocketChannel with its selector" in new TestSetup(pullMode = false)
 
-    "let the Bind commander know when binding is completed" in new TestSetup {
-      listener ! ChannelRegistered
+    "let the Bind commander know when binding is completed" in new TestSetup(pullMode = false) {
+      listener ! new ChannelRegistration {
+        def disableInterest(op: Int) = ()
+        def enableInterest(op: Int) = ()
+        def cancelAndClose(andThen: () ⇒ Unit): Unit = ()
+      }
       bindCommander.expectMsgType[Bound]
     }
 
-    "accept acceptable connections and register them with its parent" in new TestSetup {
+    "accept acceptable connections and register them with its parent" in new TestSetup(pullMode = false) {
       bindListener()
 
       attemptConnectionToEndpoint()
@@ -39,30 +48,64 @@ class TcpListenerSpec extends AkkaSpec("akka.io.tcp.batch-accept-limit = 2") {
       expectWorkerForCommand
       expectWorkerForCommand
       selectorRouter.expectNoMsg(100.millis)
-      parent.expectMsg(AcceptInterest)
+      interestCallReceiver.expectMsg(OP_ACCEPT)
 
       // and pick up the last remaining connection on the next ChannelAcceptable
       listener ! ChannelAcceptable
       expectWorkerForCommand
     }
 
-    "continue to accept connections after a previous accept" in new TestSetup {
+    "continue to accept connections after a previous accept" in new TestSetup(pullMode = false) {
       bindListener()
 
       attemptConnectionToEndpoint()
       listener ! ChannelAcceptable
       expectWorkerForCommand
       selectorRouter.expectNoMsg(100.millis)
-      parent.expectMsg(AcceptInterest)
+      interestCallReceiver.expectMsg(OP_ACCEPT)
 
       attemptConnectionToEndpoint()
       listener ! ChannelAcceptable
       expectWorkerForCommand
       selectorRouter.expectNoMsg(100.millis)
-      parent.expectMsg(AcceptInterest)
+      interestCallReceiver.expectMsg(OP_ACCEPT)
     }
 
-    "react to Unbind commands by replying with Unbound and stopping itself" in new TestSetup {
+    "not accept connections after a previous accept until read is reenabled" in new TestSetup(pullMode = true) {
+      bindListener()
+
+      attemptConnectionToEndpoint()
+      expectNoMsg(100.millis)
+
+      listener ! ResumeAccepting(batchSize = 1)
+      listener ! ChannelAcceptable
+      expectWorkerForCommand
+      selectorRouter.expectNoMsg(100.millis)
+      interestCallReceiver.expectMsg(OP_ACCEPT)
+
+      // No more accepts are allowed now
+      interestCallReceiver.expectNoMsg(100.millis)
+
+      listener ! ResumeAccepting(batchSize = 2)
+      interestCallReceiver.expectMsg(OP_ACCEPT)
+
+      attemptConnectionToEndpoint()
+      listener ! ChannelAcceptable
+      expectWorkerForCommand
+      selectorRouter.expectNoMsg(100.millis)
+      // There is still one token remaining, accepting
+      interestCallReceiver.expectMsg(OP_ACCEPT)
+
+      attemptConnectionToEndpoint()
+      listener ! ChannelAcceptable
+      expectWorkerForCommand
+      selectorRouter.expectNoMsg(100.millis)
+
+      // Tokens are depleted now
+      interestCallReceiver.expectNoMsg(100.millis)
+    }
+
+    "react to Unbind commands by replying with Unbound and stopping itself" in new TestSetup(pullMode = false) {
       bindListener()
 
       val unbindCommander = TestProbe()
@@ -72,7 +115,7 @@ class TcpListenerSpec extends AkkaSpec("akka.io.tcp.batch-accept-limit = 2") {
       parent.expectTerminated(listener)
     }
 
-    "drop an incoming connection if it cannot be registered with a selector" in new TestSetup {
+    "drop an incoming connection if it cannot be registered with a selector" in new TestSetup(pullMode = false) {
       bindListener()
 
       attemptConnectionToEndpoint()
@@ -89,19 +132,32 @@ class TcpListenerSpec extends AkkaSpec("akka.io.tcp.batch-accept-limit = 2") {
 
   val counter = Iterator.from(0)
 
-  class TestSetup { setup ⇒
+  class TestSetup(pullMode: Boolean) {
     val handler = TestProbe()
     val handlerRef = handler.ref
     val bindCommander = TestProbe()
     val parent = TestProbe()
     val selectorRouter = TestProbe()
-    val endpoint = TestUtils.temporaryServerAddress()
-    private val parentRef = TestActorRef(new ListenerParent)
+    val endpoint = SocketUtil.temporaryServerAddress()
 
-    parent.expectMsgType[RegisterChannel]
+    var registerCallReceiver = TestProbe()
+    var interestCallReceiver = TestProbe()
 
-    def bindListener() {
-      listener ! ChannelRegistered
+    private val parentRef = TestActorRef(new ListenerParent(pullMode))
+
+    val register = registerCallReceiver.expectMsgType[RegisterChannel]
+    register.initialOps should ===(if (pullMode) 0 else OP_ACCEPT)
+
+    def bindListener(): Unit = {
+      listener ! new ChannelRegistration {
+        def enableInterest(op: Int): Unit = interestCallReceiver.ref ! op
+        def disableInterest(op: Int): Unit = interestCallReceiver.ref ! -op
+        def cancelAndClose(andThen: () ⇒ Unit): Unit = {
+          register.channel.close()
+          require(!register.channel.isRegistered)
+          andThen()
+        }
+      }
       bindCommander.expectMsgType[Bound]
     }
 
@@ -112,21 +168,28 @@ class TcpListenerSpec extends AkkaSpec("akka.io.tcp.batch-accept-limit = 2") {
     def expectWorkerForCommand: SocketChannel =
       selectorRouter.expectMsgPF() {
         case WorkerForCommand(RegisterIncoming(chan), commander, _) ⇒
-          chan.isOpen must be(true)
-          commander must be === listener
+          chan.isOpen should ===(true)
+          commander should ===(listener)
           chan
       }
 
-    private class ListenerParent extends Actor {
+    private class ListenerParent(pullMode: Boolean) extends Actor with ChannelRegistry {
       val listener = context.actorOf(
-        props = Props(new TcpListener(selectorRouter.ref, Tcp(system), bindCommander.ref, Bind(handler.ref, endpoint, 100, Nil))),
+        props = Props(classOf[TcpListener], selectorRouter.ref, Tcp(system), this, bindCommander.ref,
+          Bind(handler.ref, endpoint, 100, Nil, pullMode)).withDeploy(Deploy.local),
         name = "test-listener-" + counter.next())
       parent.watch(listener)
       def receive: Receive = {
         case msg ⇒ parent.ref forward msg
       }
       override def supervisorStrategy = SupervisorStrategy.stoppingStrategy
+
+      def register(channel: SelectableChannel, initialOps: Int)(implicit channelActor: ActorRef): Unit =
+        registerCallReceiver.ref.tell(RegisterChannel(channel, initialOps), channelActor)
     }
   }
 
+}
+object TcpListenerSpec {
+  final case class RegisterChannel(channel: SelectableChannel, initialOps: Int) extends NoSerializationVerificationNeeded
 }

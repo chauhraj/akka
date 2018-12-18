@@ -1,19 +1,23 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.testkit;
 
 import akka.actor.Terminated;
-import akka.japi.Option;
 import scala.runtime.AbstractFunction0;
 import akka.actor.ActorRef;
 import akka.actor.ActorSystem;
+import akka.actor.Props;
+import akka.actor.SupervisorStrategy;
 import akka.event.Logging;
 import akka.event.Logging.LogEvent;
 import akka.japi.JavaPartialFunction;
 import akka.japi.Util;
 import scala.concurrent.duration.Duration;
 import scala.concurrent.duration.FiniteDuration;
+
+import java.util.concurrent.TimeUnit;
 
 /**
  * Java API: Test kit for testing actors. Inheriting from this class enables
@@ -22,26 +26,51 @@ import scala.concurrent.duration.FiniteDuration;
  * bounds concerning timing are available in the form of <code>Within</code>
  * blocks.
  * <p>
- * 
+ *
  * Beware of two points:
  * <p>
- * 
+ *
  * <ul>
  * <li>the ActorSystem passed into the constructor needs to be shutdown,
  * otherwise thread pools and memory will be leaked - this trait is not
  * thread-safe (only one actor with one queue, one stack of <code>Within</code>
  * blocks); take care not to run tests within a single test class instance in
  * parallel.</li>
- * 
+ *
  * <li>It should be noted that for CI servers and the like all maximum Durations
  * are scaled using the <code>dilated</code> method, which uses the
  * TestKitExtension.Settings.TestTimeFactor settable via akka.conf entry
  * "akka.test.timefactor".</li>
  * </ul>
- * 
- * 
+ *
+ * @deprecated Use {@link akka.testkit.javadsl.TestKit} instead, since 2.5.0
+ *
  */
+@Deprecated
 public class JavaTestKit {
+  /**
+   * Shut down an actor system and wait for termination.
+   * On failure debug output will be logged about the remaining actors in the system.
+   * <p>
+   *
+   * If verifySystemShutdown is true, then an exception will be thrown on failure.
+   */
+  public static void shutdownActorSystem(ActorSystem actorSystem, Duration duration, Boolean verifySystemShutdown) {
+      boolean vss = verifySystemShutdown != null ? verifySystemShutdown : false;
+      Duration dur = duration != null ? duration : FiniteDuration.create(10, TimeUnit.SECONDS);
+    TestKit.shutdownActorSystem(actorSystem, dur, vss);
+  }
+
+  public static void shutdownActorSystem(ActorSystem actorSystem) {
+    shutdownActorSystem(actorSystem, null, null);
+  }
+  public static void shutdownActorSystem(ActorSystem actorSystem, Duration duration) {
+    shutdownActorSystem(actorSystem, duration, null);
+  }
+  public static void shutdownActorSystem(ActorSystem actorSystem, Boolean verifySystemShutdown) {
+    shutdownActorSystem(actorSystem, null, verifySystemShutdown);
+  }
+
   private final TestProbe p;
 
   public JavaTestKit(ActorSystem system) {
@@ -76,7 +105,7 @@ public class JavaTestKit {
   }
 
   public Duration dilated(Duration d) {
-    return d.mul(TestKitExtension.get(p.system()).TestTimeFactor());
+    return d.mul(TestKitExtension.get(getSystem()).TestTimeFactor());
   }
 
   /**
@@ -177,17 +206,27 @@ public class JavaTestKit {
   }
 
   /**
+   * Obtain time remaining for execution of the innermost enclosing
+   * <code>Within</code> block or missing that it returns the properly dilated
+   * default for this case from settings (key
+   * "akka.test.single-expect-default").
+   */
+  public FiniteDuration remainingOrDefault() {
+    return p.remainingOrDefault();
+  }
+
+  /**
    * Execute code block while bounding its execution time between
    * <code>min</code> and <code>max</code>. <code>Within</code> blocks may be
    * nested. All methods in this trait which take maximum wait times are
    * available in a version which implicitly uses the remaining time governed by
    * the innermost enclosing <code>Within</code> block.
    * <p>
-   * 
+   *
    * Note that the timeout is scaled using <code>dilated</code>, which uses the
    * configuration entry "akka.test.timefactor", while the min Duration is not.
    * <p>
-   * 
+   *
    * <pre>
    * <code>
    * // the run() method needs to finish within 3 seconds
@@ -204,6 +243,7 @@ public class JavaTestKit {
 
     public Within(FiniteDuration max) {
       p.within(max, new AbstractFunction0<Object>() {
+        @Override
         public Object apply() {
           run();
           return null;
@@ -213,6 +253,7 @@ public class JavaTestKit {
 
     public Within(FiniteDuration min, FiniteDuration max) {
       p.within(min, max, new AbstractFunction0<Object>() {
+        @Override
         public Object apply() {
           run();
           return null;
@@ -225,11 +266,11 @@ public class JavaTestKit {
    * Await until the given condition evaluates to <code>true</code> or the
    * timeout expires, whichever comes first.
    * <p>
-   * 
+   *
    * If no timeout is given, take it from the innermost enclosing
    * <code>Within</code> block.
    * <p>
-   * 
+   *
    * Note that the timeout is scaled using Duration.dilated, which uses the
    * configuration entry "akka.test.timefactor".
    */
@@ -246,6 +287,7 @@ public class JavaTestKit {
 
     public AwaitCond(Duration max, Duration interval) {
       p.awaitCond(new AbstractFunction0<Object>() {
+        @Override
         public Object apply() {
           return cond();
         }
@@ -254,6 +296,7 @@ public class JavaTestKit {
 
     public AwaitCond(Duration max, Duration interval, String message) {
       p.awaitCond(new AbstractFunction0<Object>() {
+        @Override
         public Object apply() {
           return cond();
         }
@@ -266,11 +309,11 @@ public class JavaTestKit {
    * expires, whichever comes first. If the timeout expires the last exception
    * is thrown.
    * <p>
-   * 
+   *
    * If no timeout is given, take it from the innermost enclosing
    * <code>Within</code> block.
    * <p>
-   * 
+   *
    * Note that the timeout is scaled using Duration.dilated, which uses the
    * configuration entry "akka.test.timefactor".
    */
@@ -287,6 +330,7 @@ public class JavaTestKit {
 
     public AwaitAssert(Duration max, Duration interval) {
       p.awaitAssert(new AbstractFunction0<Object>() {
+        @Override
         public Object apply() {
           check();
           return null;
@@ -302,13 +346,13 @@ public class JavaTestKit {
    * <p>
    * The received object as transformed by the matching function can be
    * retrieved with the <code>get</code> method.
-   * 
+   *
    * Use this variant to implement more complicated or conditional processing.
    * <p>
-   * 
+   *
    * <pre>
    * <code>
-   * final String out = new ExpectMsg<String>("match hint") {
+   * final String out = new ExpectMsg&lt;String&gt;("match hint") {
    *   protected String match(Object in) {
    *     if (in instanceof Integer)
    *       return "match";
@@ -347,7 +391,7 @@ public class JavaTestKit {
   }
 
   /**
-   * Same as <code>expectMsgEquals(remaining(), obj)</code>, but correctly
+   * Same as <code>expectMsgEquals(remainingOrDefault(), obj)</code>, but correctly
    * treating the timeFactor.
    */
   public <T> T expectMsgEquals(T msg) {
@@ -358,7 +402,7 @@ public class JavaTestKit {
    * Receive one message from the test actor and assert that it equals the given
    * object. Wait time is bounded by the given duration, with an
    * AssertionFailure being thrown in case of timeout.
-   * 
+   *
    * @return the received object
    */
   public <T> T expectMsgEquals(FiniteDuration max, T msg) {
@@ -366,7 +410,7 @@ public class JavaTestKit {
   }
 
   /**
-   * Same as <code>expectMsgClass(remaining(), clazz)</code>, but correctly
+   * Same as <code>expectMsgClass(remainingOrDefault(), clazz)</code>, but correctly
    * treating the timeFactor.
    */
   public <T> T expectMsgClass(Class<T> clazz) {
@@ -377,7 +421,7 @@ public class JavaTestKit {
    * Receive one message from the test actor and assert that it conforms to the
    * given class. Wait time is bounded by the given duration, with an
    * AssertionFailure being thrown in case of timeout.
-   * 
+   *
    * @return the received object
    */
   public <T> T expectMsgClass(FiniteDuration max, Class<T> clazz) {
@@ -385,7 +429,7 @@ public class JavaTestKit {
   }
 
   /**
-   * Same as <code>expectMsgAnyOf(remaining(), obj...)</code>, but correctly
+   * Same as <code>expectMsgAnyOf(remainingOrDefault(), obj...)</code>, but correctly
    * treating the timeFactor.
    */
   public Object expectMsgAnyOf(Object... msgs) {
@@ -396,7 +440,7 @@ public class JavaTestKit {
    * Receive one message from the test actor and assert that it equals one of
    * the given objects. Wait time is bounded by the given duration, with an
    * AssertionFailure being thrown in case of timeout.
-   * 
+   *
    * @return the received object
    */
   public Object expectMsgAnyOf(FiniteDuration max, Object... msgs) {
@@ -404,7 +448,7 @@ public class JavaTestKit {
   }
 
   /**
-   * Same as <code>expectMsgAllOf(remaining(), obj...)</code>, but correctly
+   * Same as <code>expectMsgAllOf(remainingOrDefault(), obj...)</code>, but correctly
    * treating the timeFactor.
    */
   public Object[] expectMsgAllOf(Object... msgs) {
@@ -423,7 +467,7 @@ public class JavaTestKit {
   }
 
   /**
-   * Same as <code>expectMsgAnyClassOf(remaining(), obj...)</code>, but
+   * Same as <code>expectMsgAnyClassOf(remainingOrDefault(), obj...)</code>, but
    * correctly treating the timeFactor.
    */
   @SuppressWarnings("unchecked")
@@ -436,7 +480,7 @@ public class JavaTestKit {
    * Receive one message from the test actor and assert that it conforms to one
    * of the given classes. Wait time is bounded by the given duration, with an
    * AssertionFailure being thrown in case of timeout.
-   * 
+   *
    * @return the received object
    */
   public Object expectMsgAnyClassOf(FiniteDuration max, Class<?>... classes) {
@@ -444,7 +488,7 @@ public class JavaTestKit {
   }
 
   /**
-   * Same as <code>expectNoMsg(remaining())</code>, but correctly treating the
+   * Same as <code>expectNoMsg(remainingOrDefault())</code>, but correctly treating the
    * timeFactor.
    */
   public void expectNoMsg() {
@@ -468,7 +512,7 @@ public class JavaTestKit {
   }
 
   /**
-   * Same as <code>expectTerminated(remaining(), target)</code>,
+   * Same as <code>expectTerminated(remainingOrDefault(), target)</code>,
    * but correctly treating the timeFactor.
    * Don't forget to 'watch' it first!
    */
@@ -496,7 +540,7 @@ public class JavaTestKit {
    * Receive one message from the internal queue of the TestActor. If the given
    * duration is zero, the queue is polled (non-blocking).
    * <p>
-   * 
+   *
    * This method does NOT automatically scale its Duration parameter!
    */
   public Object receiveOne(Duration max) {
@@ -509,11 +553,11 @@ public class JavaTestKit {
    * default) or the overall maximum duration is elapsed. Returns the sequence
    * of messages.
    * <p>
-   * 
+   *
    * Note that it is not an error to hit the <code>max</code> duration in this
    * case.
    * <p>
-   * 
+   *
    * One possible use of this method is for testing whether messages of certain
    * characteristics are generated at a certain rate.
    */
@@ -534,7 +578,7 @@ public class JavaTestKit {
       this(clazz, max, Duration.Inf(), messages);
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings("all")
     public ReceiveWhile(Class<T> clazz, Duration max, Duration idle, int messages) {
       results = p.receiveWhile(max, idle, messages, new CachingPartialFunction<Object, T>() {
         public T match(Object msg) throws Exception {
@@ -558,7 +602,7 @@ public class JavaTestKit {
    * that you can keep your test run’s console output clean and do not miss real
    * error messages.
    * <p>
-   * 
+   *
    * If the <code>occurrences</code> is set to <code>Integer.MAX_VALUE</code>,
    * no tracking is done.
    */
@@ -583,6 +627,7 @@ public class JavaTestKit {
         this.clazz = (Class<? extends LogEvent>) clazz;
       } else
         throw new IllegalArgumentException("supplied class must either be LogEvent or Throwable");
+
     }
 
     public T exec() {
@@ -600,6 +645,7 @@ public class JavaTestKit {
       } else
         throw new IllegalArgumentException("unknown LogLevel " + clazz);
       return filter.intercept(new AbstractFunction0<T>() {
+        @Override
         public T apply() {
           return run();
         }
@@ -637,4 +683,66 @@ public class JavaTestKit {
     }
   }
 
+  /**
+   * Shut down an actor system and wait for termination.
+   * On failure debug output will be logged about the remaining actors in the system.
+   * <p>
+   *
+   * If verifySystemShutdown is true, then an exception will be thrown on failure.
+   */
+  public void shutdown(ActorSystem actorSystem, Duration duration, Boolean verifySystemShutdown) {
+    boolean vss = verifySystemShutdown != null ? verifySystemShutdown : false;
+    Duration dur = duration != null ? duration :
+            dilated(FiniteDuration.create(5, TimeUnit.SECONDS)).min(FiniteDuration.create(10, TimeUnit.SECONDS));
+    JavaTestKit.shutdownActorSystem(actorSystem, dur, vss);
+  }
+
+  public void shutdown(ActorSystem actorSystem) {
+      shutdown(actorSystem, null, null);
+  }
+  public void shutdown(ActorSystem actorSystem, Duration duration) {
+      shutdown(actorSystem, duration, null);
+  }
+  public void shutdown(ActorSystem actorSystem, Boolean verifySystemShutdown) {
+      shutdown(actorSystem, null, verifySystemShutdown);
+  }
+
+  /**
+   * Spawns an actor as a child of this test actor, and returns the child's ActorRef.
+   * @param props Props to create the child actor
+   * @param name Actor name for the child actor
+   * @param supervisorStrategy Strategy should decide what to do with failures in the actor.
+   */
+  public ActorRef childActorOf(Props props, String name, SupervisorStrategy supervisorStrategy) {
+      return p.childActorOf(props, name, supervisorStrategy);
+  }
+
+  /**
+   * Spawns an actor as a child of this test actor, and returns the child's ActorRef.
+   * The actor will have an auto-generated name.
+   * @param props Props to create the child actor
+   * @param supervisorStrategy Strategy should decide what to do with failures in the actor.
+   */
+  public ActorRef childActorOf(Props props, SupervisorStrategy supervisorStrategy) {
+      return p.childActorOf(props, supervisorStrategy);
+  }
+
+  /**
+   * Spawns an actor as a child of this test actor, and returns the child's ActorRef.
+   * The actor will be supervised using {@link SupervisorStrategy.stoppingStrategy}.
+   * @param props Props to create the child actor
+   * @param name Actor name for the child actor
+   */
+  public ActorRef childActorOf(Props props, String name) {
+      return p.childActorOf(props, name);
+  }
+
+  /**
+   * Spawns an actor as a child of this test actor, and returns the child's ActorRef.
+   * The actor will have an auto-generated name and will be supervised using {@link SupervisorStrategy.stoppingStrategy}.
+   * @param props Props to create the child actor
+   */
+  public ActorRef childActorOf(Props props) {
+      return p.childActorOf(props);
+  }
 }

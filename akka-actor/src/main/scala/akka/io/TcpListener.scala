@@ -1,115 +1,139 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.io
 
-import java.nio.channels.{ SocketChannel, SelectionKey, ServerSocketChannel }
+import java.nio.channels.{ SelectionKey, ServerSocketChannel, SocketChannel }
+import java.net.InetSocketAddress
+
 import scala.annotation.tailrec
 import scala.util.control.NonFatal
-import akka.actor.{ Props, ActorLogging, ActorRef, Actor }
+import akka.actor._
 import akka.io.SelectionHandler._
 import akka.io.Tcp._
-import akka.io.IO.HasFailureMessage
-import java.net.InetSocketAddress
+import akka.dispatch.{ RequiresMessageQueue, UnboundedMessageQueueSemantics }
 
 /**
  * INTERNAL API
  */
 private[io] object TcpListener {
 
-  case class RegisterIncoming(channel: SocketChannel) extends HasFailureMessage {
+  final case class RegisterIncoming(channel: SocketChannel) extends HasFailureMessage with NoSerializationVerificationNeeded {
     def failureMessage = FailedRegisterIncoming(channel)
   }
 
-  case class FailedRegisterIncoming(channel: SocketChannel)
+  final case class FailedRegisterIncoming(channel: SocketChannel) extends NoSerializationVerificationNeeded
 
 }
 
 /**
  * INTERNAL API
  */
-private[io] class TcpListener(val selectorRouter: ActorRef,
-                              val tcp: TcpExt,
-                              val bindCommander: ActorRef,
-                              val bind: Bind) extends Actor with ActorLogging {
+private[io] class TcpListener(
+  selectorRouter:  ActorRef,
+  tcp:             TcpExt,
+  channelRegistry: ChannelRegistry,
+  bindCommander:   ActorRef,
+  bind:            Bind)
+  extends Actor with ActorLogging with RequiresMessageQueue[UnboundedMessageQueueSemantics] {
+
   import TcpListener._
   import tcp.Settings._
-  import bind._
 
-  context.watch(handler) // sign death pact
-  val channel = {
-    val serverSocketChannel = ServerSocketChannel.open
-    serverSocketChannel.configureBlocking(false)
-    val socket = serverSocketChannel.socket
-    options.foreach(_.beforeServerSocketBind(socket))
+  context.watch(bind.handler) // sign death pact
+
+  val channel = ServerSocketChannel.open
+  channel.configureBlocking(false)
+
+  var acceptLimit = if (bind.pullMode) 0 else BatchAcceptLimit
+
+  val localAddress =
     try {
-      socket.bind(localAddress, backlog)
-      require(socket.getLocalSocketAddress.isInstanceOf[InetSocketAddress],
-        s"bound to unknown SocketAddress [${socket.getLocalSocketAddress}]")
+      val socket = channel.socket
+      bind.options.foreach(_.beforeServerSocketBind(socket))
+      socket.bind(bind.localAddress, bind.backlog)
+      val ret = socket.getLocalSocketAddress match {
+        case isa: InetSocketAddress ⇒ isa
+        case x                      ⇒ throw new IllegalArgumentException(s"bound to unknown SocketAddress [$x]")
+      }
+      channelRegistry.register(channel, if (bind.pullMode) 0 else SelectionKey.OP_ACCEPT)
+      log.debug("Successfully bound to {}", ret)
+      bind.options.foreach {
+        case o: Inet.SocketOptionV2 ⇒ o.afterBind(channel.socket)
+        case _                      ⇒
+      }
+      ret
     } catch {
       case NonFatal(e) ⇒
-        bindCommander ! bind.failureMessage
-        log.error(e, "Bind failed for TCP channel on endpoint [{}]", localAddress)
+        bindCommander ! bind.failureMessage.withCause(e)
+        log.error(e, "Bind failed for TCP channel on endpoint [{}]", bind.localAddress)
         context.stop(self)
     }
-    serverSocketChannel
-  }
-  context.parent ! RegisterChannel(channel, SelectionKey.OP_ACCEPT)
-  log.debug("Successfully bound to {}", localAddress)
 
-  override def supervisorStrategy = IO.connectionSupervisorStrategy
+  override def supervisorStrategy = SelectionHandler.connectionSupervisorStrategy
 
   def receive: Receive = {
-    case ChannelRegistered ⇒
+    case registration: ChannelRegistration ⇒
       bindCommander ! Bound(channel.socket.getLocalSocketAddress.asInstanceOf[InetSocketAddress])
-      context.become(bound)
+      context.become(bound(registration))
   }
 
-  def bound: Receive = {
+  def bound(registration: ChannelRegistration): Receive = {
     case ChannelAcceptable ⇒
-      acceptAllPending(BatchAcceptLimit)
+      acceptLimit = acceptAllPending(registration, acceptLimit)
+      if (acceptLimit > 0) registration.enableInterest(SelectionKey.OP_ACCEPT)
+
+    case ResumeAccepting(batchSize) ⇒
+      acceptLimit = batchSize
+      registration.enableInterest(SelectionKey.OP_ACCEPT)
 
     case FailedRegisterIncoming(socketChannel) ⇒
       log.warning("Could not register incoming connection since selector capacity limit is reached, closing connection")
       try socketChannel.close()
       catch {
-        case NonFatal(e) ⇒ log.error(e, "Error closing channel")
+        case NonFatal(e) ⇒ log.debug("Error closing socket channel: {}", e)
       }
 
     case Unbind ⇒
       log.debug("Unbinding endpoint {}", localAddress)
-      channel.close()
-      sender ! Unbound
+      registration.cancelAndClose { () ⇒ self ! Unbound }
+
+      context.become(unregistering(sender()))
+  }
+  def unregistering(requester: ActorRef): Receive = {
+    case Unbound ⇒
+      requester ! Unbound
       log.debug("Unbound endpoint {}, stopping listener", localAddress)
       context.stop(self)
   }
 
-  @tailrec final def acceptAllPending(limit: Int): Unit = {
+  @tailrec final def acceptAllPending(registration: ChannelRegistration, limit: Int): Int = {
     val socketChannel =
       if (limit > 0) {
         try channel.accept()
         catch {
-          case NonFatal(e) ⇒ { log.error(e, "Accept error: could not accept new connection due to {}", e); null }
+          case NonFatal(e) ⇒ { log.error(e, "Accept error: could not accept new connection"); null }
         }
       } else null
     if (socketChannel != null) {
       log.debug("New connection accepted")
       socketChannel.configureBlocking(false)
-      selectorRouter ! WorkerForCommand(RegisterIncoming(socketChannel), self, Props(new TcpIncomingConnection(socketChannel, tcp, handler, options)))
-      acceptAllPending(limit - 1)
-    } else context.parent ! AcceptInterest
+      def props(registry: ChannelRegistry) =
+        Props(classOf[TcpIncomingConnection], tcp, socketChannel, registry, bind.handler, bind.options, bind.pullMode)
+      selectorRouter ! WorkerForCommand(RegisterIncoming(socketChannel), self, props)
+      acceptAllPending(registration, limit - 1)
+    } else if (bind.pullMode) limit else BatchAcceptLimit
   }
 
-  override def postStop() {
+  override def postStop(): Unit = {
     try {
       if (channel.isOpen) {
         log.debug("Closing serverSocketChannel after being stopped")
         channel.close()
       }
     } catch {
-      case NonFatal(e) ⇒ log.error(e, "Error closing ServerSocketChannel")
+      case NonFatal(e) ⇒ log.debug("Error closing ServerSocketChannel: {}", e)
     }
   }
-
 }

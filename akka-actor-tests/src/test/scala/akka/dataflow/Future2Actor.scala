@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.dataflow
 
 import language.postfixOps
@@ -26,27 +27,27 @@ class Future2ActorSpec extends AkkaSpec with DefaultTimeout {
       implicit val someActor = system.actorOf(Props(new Actor { def receive = Actor.emptyBehavior }))
       Future(42) pipeTo testActor pipeTo testActor
       expectMsgAllOf(1 second, 42, 42)
-      lastSender must be(someActor)
+      lastSender should ===(someActor)
     }
 
     "support convenient sending with explicit sender" in {
       val someActor = system.actorOf(Props(new Actor { def receive = Actor.emptyBehavior }))
       Future(42).to(testActor, someActor)
       expectMsgAllOf(1 second, 42)
-      lastSender must be(someActor)
+      lastSender should ===(someActor)
     }
 
     "support reply via sender" in {
       val actor = system.actorOf(Props(new Actor {
         def receive = {
-          case "do" ⇒ Future(31) pipeTo context.sender
-          case "ex" ⇒ Future(throw new AssertionError) pipeTo context.sender
+          case "do" ⇒ Future(31) pipeTo context.sender()
+          case "ex" ⇒ Future(throw new AssertionError) pipeTo context.sender()
         }
       }))
-      Await.result(actor ? "do", timeout.duration) must be(31)
+      Await.result(actor ? "do", timeout.duration) should ===(31)
       intercept[ExecutionException] {
         Await.result(actor ? "ex", timeout.duration)
-      }.getCause.isInstanceOf[AssertionError] must be(true)
+      }.getCause.isInstanceOf[AssertionError] should ===(true)
     }
   }
 }

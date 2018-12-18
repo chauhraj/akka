@@ -1,11 +1,12 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.osgi
 
 import de.kalpatec.pojosr.framework.launch.{ BundleDescriptor, PojoServiceRegistryFactory, ClasspathScanner }
 
-import scala.collection.JavaConversions.seqAsJavaList
+import scala.collection.JavaConverters._
 import org.apache.commons.io.IOUtils.copy
 
 import org.osgi.framework._
@@ -40,7 +41,7 @@ trait PojoSRTestSupport extends Suite with BeforeAndAfterAll {
     System.setProperty("org.osgi.framework.storage", "target/akka-osgi/" + UUID.randomUUID().toString)
 
     val bundles = new ClasspathScanner().scanForBundles()
-    bundles.addAll(testBundles)
+    bundles.addAll(testBundles.asJava)
     config.put(PojoServiceRegistryFactory.BUNDLE_DESCRIPTORS, bundles)
 
     val oldErr = System.err
@@ -70,18 +71,18 @@ trait PojoSRTestSupport extends Suite with BeforeAndAfterAll {
   def serviceForType[T](implicit t: ClassTag[T]): T =
     context.getService(awaitReference(t.runtimeClass)).asInstanceOf[T]
 
-  def awaitReference(serviceType: Class[_]): ServiceReference = awaitReference(serviceType, SleepyTime)
+  def awaitReference[T](serviceType: Class[T]): ServiceReference[T] = awaitReference(serviceType, SleepyTime)
 
-  def awaitReference(serviceType: Class[_], wait: FiniteDuration): ServiceReference = {
+  def awaitReference[T](serviceType: Class[T], wait: FiniteDuration): ServiceReference[T] = {
 
-    @tailrec def poll(step: Duration, deadline: Deadline): ServiceReference = context.getServiceReference(serviceType.getName) match {
+    @tailrec def poll(step: Duration, deadline: Deadline): ServiceReference[T] = context.getServiceReference(serviceType.getName) match {
       case null ⇒
         if (deadline.isOverdue()) fail("Gave up waiting for service of type %s".format(serviceType))
         else {
           Thread.sleep((step min deadline.timeLeft max Duration.Zero).toMillis)
           poll(step, deadline)
         }
-      case some ⇒ some
+      case some ⇒ some.asInstanceOf[ServiceReference[T]]
     }
 
     poll(wait, Deadline.now + MaxWaitDuration)

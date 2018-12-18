@@ -1,37 +1,41 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import akka.testkit._
 import akka.actor._
 import akka.routing._
 import com.typesafe.config._
-import akka.cluster.routing.ClusterRouterConfig
-import akka.cluster.routing.ClusterRouterSettings
+import akka.cluster.routing.ClusterRouterPool
+import akka.cluster.routing.ClusterRouterGroup
+import akka.cluster.routing.ClusterRouterPoolSettings
+import akka.cluster.routing.ClusterRouterGroupSettings
 
 object ClusterDeployerSpec {
   val deployerConf = ConfigFactory.parseString("""
-      akka.actor.provider = "akka.cluster.ClusterActorRefProvider"
+      akka.actor.provider = "cluster"
       akka.actor.deployment {
         /user/service1 {
-          router = round-robin
-          nr-of-instances = 20
+          router = round-robin-pool
           cluster.enabled = on
           cluster.max-nr-of-instances-per-node = 3
+          cluster.max-total-nr-of-instances = 20
           cluster.allow-local-routees = off
         }
         /user/service2 {
           dispatcher = mydispatcher
           mailbox = mymailbox
-          router = round-robin
-          nr-of-instances = 20
+          router = round-robin-group
+          routees.paths = ["/user/myservice"]
           cluster.enabled = on
+          cluster.max-total-nr-of-instances = 20
           cluster.allow-local-routees = off
-          cluster.routees-path = "/user/myservice"
         }
       }
       akka.remote.netty.tcp.port = 0
+      akka.remote.artery.canonical.port = 0
       """, ConfigParseOptions.defaults)
 
   class RecipeActor extends Actor {
@@ -40,38 +44,37 @@ object ClusterDeployerSpec {
 
 }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class ClusterDeployerSpec extends AkkaSpec(ClusterDeployerSpec.deployerConf) {
 
   "A RemoteDeployer" must {
 
-    "be able to parse 'akka.actor.deployment._' with specified cluster lookup routee settings" in {
+    "be able to parse 'akka.actor.deployment._' with specified cluster pool" in {
       val service = "/user/service1"
       val deployment = system.asInstanceOf[ActorSystemImpl].provider.deployer.lookup(service.split("/").drop(1))
-      deployment must not be (None)
+      deployment should not be (None)
 
-      deployment must be(Some(
+      deployment should ===(Some(
         Deploy(
           service,
           deployment.get.config,
-          ClusterRouterConfig(RoundRobinRouter(20), ClusterRouterSettings(
-            totalInstances = 20, maxInstancesPerNode = 3, allowLocalRoutees = false, useRole = None)),
+          ClusterRouterPool(RoundRobinPool(20), ClusterRouterPoolSettings(
+            totalInstances = 20, maxInstancesPerNode = 3, allowLocalRoutees = false)),
           ClusterScope,
           Deploy.NoDispatcherGiven,
           Deploy.NoMailboxGiven)))
     }
 
-    "be able to parse 'akka.actor.deployment._' with specified cluster deploy routee settings" in {
+    "be able to parse 'akka.actor.deployment._' with specified cluster group" in {
       val service = "/user/service2"
       val deployment = system.asInstanceOf[ActorSystemImpl].provider.deployer.lookup(service.split("/").drop(1))
-      deployment must not be (None)
+      deployment should not be (None)
 
-      deployment must be(Some(
+      deployment should ===(Some(
         Deploy(
           service,
           deployment.get.config,
-          ClusterRouterConfig(RoundRobinRouter(20), ClusterRouterSettings(
-            totalInstances = 20, routeesPath = "/user/myservice", allowLocalRoutees = false, useRole = None)),
+          ClusterRouterGroup(RoundRobinGroup(List("/user/myservice")), ClusterRouterGroupSettings(
+            totalInstances = 20, routeesPaths = List("/user/myservice"), allowLocalRoutees = false)),
           ClusterScope,
           "mydispatcher",
           "mymailbox")))

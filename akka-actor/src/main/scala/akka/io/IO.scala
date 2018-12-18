@@ -1,59 +1,28 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.io
 
-import scala.util.control.NonFatal
 import akka.actor._
-import akka.routing.RandomRouter
-import akka.io.SelectionHandler.WorkerForCommand
-import akka.event.Logging
 
+/**
+ * Entry point to Akka’s IO layer.
+ *
+ * @see <a href="http://doc.akka.io/">the Akka online documentation</a>
+ */
 object IO {
 
   trait Extension extends akka.actor.Extension {
     def manager: ActorRef
   }
 
-  def apply[T <: Extension](key: ExtensionKey[T])(implicit system: ActorSystem): ActorRef = key(system).manager
-
-  trait HasFailureMessage {
-    def failureMessage: Any
-  }
-
-  abstract class SelectorBasedManager(selectorSettings: SelectionHandlerSettings, nrOfSelectors: Int) extends Actor {
-
-    override def supervisorStrategy = connectionSupervisorStrategy
-
-    val selectorPool = context.actorOf(
-      props = Props(new SelectionHandler(self, selectorSettings)).withRouter(RandomRouter(nrOfSelectors)),
-      name = "selectors")
-
-    private def createWorkerMessage(pf: PartialFunction[HasFailureMessage, Props]): PartialFunction[HasFailureMessage, WorkerForCommand] = {
-      case cmd ⇒
-        val props = pf(cmd)
-        val commander = sender
-        WorkerForCommand(cmd, commander, props)
-    }
-
-    def workerForCommandHandler(pf: PartialFunction[Any, Props]): Receive = {
-      case cmd: HasFailureMessage if pf.isDefinedAt(cmd) ⇒ selectorPool ! createWorkerMessage(pf)(cmd)
-    }
-  }
-
   /**
-   * Special supervisor strategy for parents of TCP connection and listener actors.
-   * Stops the child on all errors and logs DeathPactExceptions only at debug level.
+   * Scala API: obtain a reference to the manager actor for the given IO extension,
+   * for example [[Tcp]] or [[Udp]].
+   *
+   * For the Java API please refer to the individual extensions directly.
    */
-  private[io] final val connectionSupervisorStrategy: SupervisorStrategy =
-    new OneForOneStrategy()(SupervisorStrategy.stoppingStrategy.decider) {
-      override protected def logFailure(context: ActorContext, child: ActorRef, cause: Throwable,
-                                        decision: SupervisorStrategy.Directive): Unit =
-        if (cause.isInstanceOf[DeathPactException]) {
-          try context.system.eventStream.publish {
-            Logging.Debug(child.path.toString, getClass, "Closed after handler termination")
-          } catch { case NonFatal(_) ⇒ }
-        } else super.logFailure(context, child, cause, decision)
-    }
+  def apply[T <: Extension](key: ExtensionId[T])(implicit system: ActorSystem): ActorRef = key(system).manager
+
 }

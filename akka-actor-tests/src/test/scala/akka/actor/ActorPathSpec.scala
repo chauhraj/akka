@@ -1,24 +1,25 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor
 
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
 import java.net.MalformedURLException
 
-class ActorPathSpec extends WordSpec with MustMatchers {
+import org.scalatest.{ Matchers, WordSpec }
+
+class ActorPathSpec extends WordSpec with Matchers {
 
   "An ActorPath" must {
 
     "support parsing its String rep" in {
       val path = RootActorPath(Address("akka.tcp", "mysys")) / "user"
-      ActorPath.fromString(path.toString) must be(path)
+      ActorPath.fromString(path.toString) should ===(path)
     }
 
     "support parsing remote paths" in {
-      val remote = "akka://sys@host:1234/some/ref"
-      ActorPath.fromString(remote).toString must be(remote)
+      val remote = "akka://my_sys@host:1234/some/ref"
+      ActorPath.fromString(remote).toString should ===(remote)
     }
 
     "throw exception upon malformed paths" in {
@@ -31,14 +32,26 @@ class ActorPathSpec extends WordSpec with MustMatchers {
 
     "create correct toString" in {
       val a = Address("akka.tcp", "mysys")
-      RootActorPath(a).toString must be("akka.tcp://mysys/")
-      (RootActorPath(a) / "user").toString must be("akka.tcp://mysys/user")
-      (RootActorPath(a) / "user" / "foo").toString must be("akka.tcp://mysys/user/foo")
-      (RootActorPath(a) / "user" / "foo" / "bar").toString must be("akka.tcp://mysys/user/foo/bar")
+      RootActorPath(a).toString should ===("akka.tcp://mysys/")
+      (RootActorPath(a) / "user").toString should ===("akka.tcp://mysys/user")
+      (RootActorPath(a) / "user" / "foo").toString should ===("akka.tcp://mysys/user/foo")
+      (RootActorPath(a) / "user" / "foo" / "bar").toString should ===("akka.tcp://mysys/user/foo/bar")
     }
 
     "have correct path elements" in {
-      (RootActorPath(Address("akka.tcp", "mysys")) / "user" / "foo" / "bar").elements.toSeq must be(Seq("user", "foo", "bar"))
+      (RootActorPath(Address("akka.tcp", "mysys")) / "user" / "foo" / "bar").elements.toSeq should ===(Seq("user", "foo", "bar"))
+    }
+
+    "create correct toStringWithoutAddress" in {
+      val a = Address("akka.tcp", "mysys")
+      RootActorPath(a).toStringWithoutAddress should ===("/")
+      (RootActorPath(a) / "user").toStringWithoutAddress should ===("/user")
+      (RootActorPath(a) / "user" / "foo").toStringWithoutAddress should ===("/user/foo")
+      (RootActorPath(a) / "user" / "foo" / "bar").toStringWithoutAddress should ===("/user/foo/bar")
+    }
+
+    "validate path elements" in {
+      intercept[InvalidActorNameException](ActorPath.validatePathElement("")).getMessage should include("must not be empty")
     }
 
     "create correct toStringWithAddress" in {
@@ -47,23 +60,32 @@ class ActorPathSpec extends WordSpec with MustMatchers {
       val b = a.copy(host = Some("bb"))
       val c = a.copy(host = Some("cccc"))
       val root = RootActorPath(local)
-      root.toStringWithAddress(a) must be("akka.tcp://mysys@aaa:2552/")
-      (root / "user").toStringWithAddress(a) must be("akka.tcp://mysys@aaa:2552/user")
-      (root / "user" / "foo").toStringWithAddress(a) must be("akka.tcp://mysys@aaa:2552/user/foo")
+      root.toStringWithAddress(a) should ===("akka.tcp://mysys@aaa:2552/")
+      (root / "user").toStringWithAddress(a) should ===("akka.tcp://mysys@aaa:2552/user")
+      (root / "user" / "foo").toStringWithAddress(a) should ===("akka.tcp://mysys@aaa:2552/user/foo")
 
-      //      root.toStringWithAddress(b) must be("akka.tcp://mysys@bb:2552/")
-      (root / "user").toStringWithAddress(b) must be("akka.tcp://mysys@bb:2552/user")
-      (root / "user" / "foo").toStringWithAddress(b) must be("akka.tcp://mysys@bb:2552/user/foo")
+      //      root.toStringWithAddress(b) should ===("akka.tcp://mysys@bb:2552/")
+      (root / "user").toStringWithAddress(b) should ===("akka.tcp://mysys@bb:2552/user")
+      (root / "user" / "foo").toStringWithAddress(b) should ===("akka.tcp://mysys@bb:2552/user/foo")
 
-      root.toStringWithAddress(c) must be("akka.tcp://mysys@cccc:2552/")
-      (root / "user").toStringWithAddress(c) must be("akka.tcp://mysys@cccc:2552/user")
-      (root / "user" / "foo").toStringWithAddress(c) must be("akka.tcp://mysys@cccc:2552/user/foo")
+      root.toStringWithAddress(c) should ===("akka.tcp://mysys@cccc:2552/")
+      (root / "user").toStringWithAddress(c) should ===("akka.tcp://mysys@cccc:2552/user")
+      (root / "user" / "foo").toStringWithAddress(c) should ===("akka.tcp://mysys@cccc:2552/user/foo")
 
       val rootA = RootActorPath(a)
-      rootA.toStringWithAddress(b) must be("akka.tcp://mysys@aaa:2552/")
-      (rootA / "user").toStringWithAddress(b) must be("akka.tcp://mysys@aaa:2552/user")
-      (rootA / "user" / "foo").toStringWithAddress(b) must be("akka.tcp://mysys@aaa:2552/user/foo")
-
+      rootA.toStringWithAddress(b) should ===("akka.tcp://mysys@aaa:2552/")
+      (rootA / "user").toStringWithAddress(b) should ===("akka.tcp://mysys@aaa:2552/user")
+      (rootA / "user" / "foo").toStringWithAddress(b) should ===("akka.tcp://mysys@aaa:2552/user/foo")
     }
+
+    "not allow path separators in RootActorPath's name" in {
+      intercept[IllegalArgumentException] {
+        RootActorPath(Address("akka.tcp", "mysys"), "/user/boom/*") // illegally pass in a path where name is expected
+      }.getMessage should include("is a path separator")
+
+      // sanity check that creating such path still works
+      ActorPath.fromString("akka://mysys/user/boom/*")
+    }
+
   }
 }

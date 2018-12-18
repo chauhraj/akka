@@ -1,46 +1,52 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.io
 
-import akka.actor._
 import java.nio.channels.DatagramChannel
-import akka.io.Udp._
-import akka.io.SelectionHandler.{ ChannelRegistered, RegisterChannel }
 import scala.collection.immutable
-import akka.io.Inet.SocketOption
 import scala.util.control.NonFatal
+import akka.dispatch.{ RequiresMessageQueue, UnboundedMessageQueueSemantics }
+import akka.io.Inet.SocketOption
+import akka.io.Udp._
+import akka.actor._
 
 /**
  * INTERNAL API
  */
-private[io] class UdpSender(val udp: UdpExt, options: immutable.Traversable[SocketOption], val commander: ActorRef)
-  extends Actor with ActorLogging with WithUdpSend {
-
-  def selector: ActorRef = context.parent
+private[io] class UdpSender(
+  val udp:         UdpExt,
+  channelRegistry: ChannelRegistry,
+  commander:       ActorRef,
+  options:         immutable.Traversable[SocketOption])
+  extends Actor with ActorLogging with WithUdpSend with RequiresMessageQueue[UnboundedMessageQueueSemantics] {
 
   val channel = {
     val datagramChannel = DatagramChannel.open
     datagramChannel.configureBlocking(false)
     val socket = datagramChannel.socket
-
     options foreach { _.beforeDatagramBind(socket) }
 
     datagramChannel
   }
-  selector ! RegisterChannel(channel, 0)
+  channelRegistry.register(channel, initialOps = 0)
 
   def receive: Receive = {
-    case ChannelRegistered ⇒
-      context.become(sendHandlers, discardOld = true)
-      commander ! SimpleSendReady
+    case registration: ChannelRegistration ⇒
+      options.foreach {
+        case v2: Inet.SocketOptionV2 ⇒ v2.afterConnect(channel.socket)
+        case _                       ⇒
+      }
+      commander ! SimpleSenderReady
+      context.become(sendHandlers(registration))
   }
 
   override def postStop(): Unit = if (channel.isOpen) {
     log.debug("Closing DatagramChannel after being stopped")
     try channel.close()
     catch {
-      case NonFatal(e) ⇒ log.error(e, "Error closing DatagramChannel")
+      case NonFatal(e) ⇒ log.debug("Error closing DatagramChannel: {}", e)
     }
   }
 }

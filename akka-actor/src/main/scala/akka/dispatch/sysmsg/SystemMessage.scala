@@ -1,10 +1,12 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.dispatch.sysmsg
 
 import scala.annotation.tailrec
-import akka.actor.{ InternalActorRef, ActorRef, PossiblyHarmful }
+import akka.actor.{ ActorInitializationException, InternalActorRef, ActorRef, PossiblyHarmful }
+import akka.actor.DeadLetterSuppression
 
 /**
  * INTERNAL API
@@ -12,7 +14,7 @@ import akka.actor.{ InternalActorRef, ActorRef, PossiblyHarmful }
  * Helper companion object for [[akka.dispatch.sysmsg.LatestFirstSystemMessageList]] and
  * [[akka.dispatch.sysmsg.EarliestFirstSystemMessageList]]
  */
-object SystemMessageList {
+private[akka] object SystemMessageList {
   final val LNil: LatestFirstSystemMessageList = new LatestFirstSystemMessageList(null)
   final val ENil: EarliestFirstSystemMessageList = new EarliestFirstSystemMessageList(null)
 
@@ -33,7 +35,7 @@ object SystemMessageList {
  *
  * INTERNAL API
  *
- * Value class supporting list operations on system messages. The `next` field of [[akka.dispatch.sysmsg.SystemMessage]]
+ * Value class supporting list operations on system messages. The `next` field of [[SystemMessage]]
  * is hidden, and can only accessed through the value classes [[akka.dispatch.sysmsg.LatestFirstSystemMessageList]] and
  * [[akka.dispatch.sysmsg.EarliestFirstSystemMessageList]], abstracting over the fact that system messages are the
  * list nodes themselves. If used properly, this stays a compile time construct without any allocation overhead.
@@ -44,7 +46,7 @@ object SystemMessageList {
  * latest appended element.
  *
  */
-class LatestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
+private[akka] class LatestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
   import SystemMessageList._
 
   /**
@@ -65,7 +67,7 @@ class LatestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
   /**
    * Gives back the list containing all the elements except the first. This operation has constant cost.
    *
-   * *Warning:* as the underlying list nodes (the [[akka.dispatch.sysmsg.SystemMessage]] instances) are mutable, care
+   * *Warning:* as the underlying list nodes (the [[SystemMessage]] instances) are mutable, care
    * should be taken when passing the tail to other methods. [[akka.dispatch.sysmsg.SystemMessage#unlink]] should be
    * called on the head if one wants to detach the tail permanently.
    */
@@ -94,7 +96,7 @@ class LatestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
  *
  * INTERNAL API
  *
- * Value class supporting list operations on system messages. The `next` field of [[akka.dispatch.sysmsg.SystemMessage]]
+ * Value class supporting list operations on system messages. The `next` field of [[SystemMessage]]
  * is hidden, and can only accessed through the value classes [[akka.dispatch.sysmsg.LatestFirstSystemMessageList]] and
  * [[akka.dispatch.sysmsg.EarliestFirstSystemMessageList]], abstracting over the fact that system messages are the
  * list nodes themselves. If used properly, this stays a compile time construct without any allocation overhead.
@@ -105,7 +107,7 @@ class LatestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
  * latest appended element.
  *
  */
-class EarliestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
+private[akka] class EarliestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
   import SystemMessageList._
 
   /**
@@ -126,7 +128,7 @@ class EarliestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
   /**
    * Gives back the list containing all the elements except the first. This operation has constant cost.
    *
-   * *Warning:* as the underlying list nodes (the [[akka.dispatch.sysmsg.SystemMessage]] instances) are mutable, care
+   * *Warning:* as the underlying list nodes (the [[SystemMessage]] instances) are mutable, care
    * should be taken when passing the tail to other methods. [[akka.dispatch.sysmsg.SystemMessage#unlink]] should be
    * called on the head if one wants to detach the tail permanently.
    */
@@ -181,7 +183,7 @@ class EarliestFirstSystemMessageList(val head: SystemMessage) extends AnyVal {
  *
  * INTERNAL API
  *
- * ➡➡➡ NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS ⬅⬅⬅
+ * <b>NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS</b>
  */
 private[akka] sealed trait SystemMessage extends PossiblyHarmful with Serializable {
   // Next fields are only modifiable via the SystemMessageList value class
@@ -193,66 +195,73 @@ private[akka] sealed trait SystemMessage extends PossiblyHarmful with Serializab
   def unlinked: Boolean = next eq null
 }
 
-trait StashWhenWaitingForChildren
+/**
+ * INTERNAL API
+ */
+private[akka] trait StashWhenWaitingForChildren
 
-trait StashWhenFailed
+/**
+ * INTERNAL API
+ */
+private[akka] trait StashWhenFailed
 
 /**
  * INTERNAL API
  */
-@SerialVersionUID(-4836972106317757555L)
-private[akka] case class Create() extends SystemMessage // send to self from Dispatcher.register
+@SerialVersionUID(1L)
+private[akka] final case class Create(failure: Option[ActorInitializationException]) extends SystemMessage // sent to self from Dispatcher.register
 /**
  * INTERNAL API
  */
-@SerialVersionUID(686735569005808256L)
-private[akka] case class Recreate(cause: Throwable) extends SystemMessage with StashWhenWaitingForChildren // sent to self from ActorCell.restart
+@SerialVersionUID(1L)
+private[akka] final case class Recreate(cause: Throwable) extends SystemMessage with StashWhenWaitingForChildren // sent to self from ActorCell.restart
 /**
  * INTERNAL API
  */
-@SerialVersionUID(7270271967867221401L)
-private[akka] case class Suspend() extends SystemMessage with StashWhenWaitingForChildren // sent to self from ActorCell.suspend
+@SerialVersionUID(1L)
+private[akka] final case class Suspend() extends SystemMessage with StashWhenWaitingForChildren // sent to self from ActorCell.suspend
 /**
  * INTERNAL API
  */
-@SerialVersionUID(-2567504317093262591L)
-private[akka] case class Resume(causedByFailure: Throwable) extends SystemMessage with StashWhenWaitingForChildren // sent to self from ActorCell.resume
+@SerialVersionUID(1L)
+private[akka] final case class Resume(causedByFailure: Throwable) extends SystemMessage with StashWhenWaitingForChildren // sent to self from ActorCell.resume
 /**
  * INTERNAL API
  */
-@SerialVersionUID(708873453777219599L)
-private[akka] case class Terminate() extends SystemMessage // sent to self from ActorCell.stop
+@SerialVersionUID(1L)
+private[akka] final case class Terminate() extends SystemMessage with DeadLetterSuppression // sent to self from ActorCell.stop
+
 /**
  * INTERNAL API
  */
-@SerialVersionUID(3245747602115485675L)
-private[akka] case class Supervise(child: ActorRef, async: Boolean) extends SystemMessage // sent to supervisor ActorRef from ActorCell.start
+@SerialVersionUID(1L)
+private[akka] final case class Supervise(child: ActorRef, async: Boolean) extends SystemMessage // sent to supervisor ActorRef from ActorCell.start
 /**
  * INTERNAL API
  */
-@SerialVersionUID(3323205435124174788L)
-private[akka] case class Watch(watchee: InternalActorRef, watcher: InternalActorRef) extends SystemMessage // sent to establish a DeathWatch
+@SerialVersionUID(1L)
+private[akka] final case class Watch(watchee: InternalActorRef, watcher: InternalActorRef) extends SystemMessage // sent to establish a DeathWatch
 /**
  * INTERNAL API
  */
-@SerialVersionUID(6363620903363658256L)
-private[akka] case class Unwatch(watchee: ActorRef, watcher: ActorRef) extends SystemMessage // sent to tear down a DeathWatch
+@SerialVersionUID(1L) // Watch and Unwatch have different signatures, but this can't be changed without breaking serialization compatibility
+private[akka] final case class Unwatch(watchee: ActorRef, watcher: ActorRef) extends SystemMessage // sent to tear down a DeathWatch
 /**
  * INTERNAL API
  */
-@SerialVersionUID(-5475916034683997987L)
+@SerialVersionUID(1L)
 private[akka] case object NoMessage extends SystemMessage // switched into the mailbox to signal termination
 
 /**
  * INTERNAL API
  */
 @SerialVersionUID(1L)
-private[akka] case class Failed(child: ActorRef, cause: Throwable, uid: Int) extends SystemMessage
+private[akka] final case class Failed(child: ActorRef, cause: Throwable, uid: Int) extends SystemMessage
   with StashWhenFailed
   with StashWhenWaitingForChildren
 
 @SerialVersionUID(1L)
-private[akka] case class DeathWatchNotification(
-  actor: ActorRef,
+private[akka] final case class DeathWatchNotification(
+  actor:              ActorRef,
   existenceConfirmed: Boolean,
-  addressTerminated: Boolean) extends SystemMessage
+  addressTerminated:  Boolean) extends SystemMessage with DeadLetterSuppression

@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import language.postfixOps
@@ -9,18 +10,16 @@ import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import akka.actor._
 import scala.concurrent.duration._
-import scala.collection.immutable
 
-case class LeaderDowningNodeThatIsUnreachableMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
+final case class LeaderDowningNodeThatIsUnreachableMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
   val first = role("first")
   val second = role("second")
   val third = role("third")
   val fourth = role("fourth")
 
   commonConfig(debugConfig(on = false).
-    withFallback(ConfigFactory.parseString("akka.cluster.auto-down = on")).
+    withFallback(ConfigFactory.parseString("akka.cluster.auto-down-unreachable-after = 2s")).
     withFallback(MultiNodeClusterSpec.clusterConfig(failureDetectorPuppet)))
 }
 
@@ -50,9 +49,11 @@ abstract class LeaderDowningNodeThatIsUnreachableSpec(multiNodeConfig: LeaderDow
       awaitClusterUp(first, second, third, fourth)
 
       val fourthAddress = address(fourth)
+
+      enterBarrier("before-exit-fourth-node")
       runOn(first) {
         // kill 'fourth' node
-        testConductor.shutdown(fourth, 0).await
+        testConductor.exit(fourth, 0).await
         enterBarrier("down-fourth-node")
 
         // mark the node as unreachable in the failure detector
@@ -82,7 +83,7 @@ abstract class LeaderDowningNodeThatIsUnreachableSpec(multiNodeConfig: LeaderDow
       enterBarrier("before-down-second-node")
       runOn(first) {
         // kill 'second' node
-        testConductor.shutdown(second, 0).await
+        testConductor.exit(second, 0).await
         enterBarrier("down-second-node")
 
         // mark the node as unreachable in the failure detector

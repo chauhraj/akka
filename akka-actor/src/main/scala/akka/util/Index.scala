@@ -1,19 +1,19 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.util
 
 import annotation.tailrec
 
 import java.util.concurrent.{ ConcurrentSkipListSet, ConcurrentHashMap }
-import java.util.{ Comparator, Set ⇒ JSet }
+import java.util.Comparator
 import scala.collection.JavaConverters.{ asScalaIteratorConverter, collectionAsScalaIterableConverter }
-import scala.collection.mutable
 
 /**
  * An implementation of a ConcurrentMultiMap
  * Adds/remove is serialized over the specified key
- * Reads are fully concurrent <-- el-cheapo
+ * Reads are fully concurrent &lt;-- el-cheapo
  */
 class Index[K, V](val mapSize: Int, val valueComparator: Comparator[V]) {
 
@@ -21,7 +21,7 @@ class Index[K, V](val mapSize: Int, val valueComparator: Comparator[V]) {
     def compare(a: V, b: V): Int = cmp(a, b)
   })
 
-  private val container = new ConcurrentHashMap[K, JSet[V]](mapSize)
+  private val container = new ConcurrentHashMap[K, ConcurrentSkipListSet[V]](mapSize)
   private val emptySet = new ConcurrentSkipListSet[V]
 
   /**
@@ -98,12 +98,12 @@ class Index[K, V](val mapSize: Int, val valueComparator: Comparator[V]) {
    * Returns the union of all value sets.
    */
   def values: Set[V] = {
-    val builder = mutable.Set.empty[V]
+    val builder = Set.newBuilder[V]
     for {
       values ← container.values.iterator.asScala
       v ← values.iterator.asScala
     } builder += v
-    builder.toSet
+    builder.result()
   }
 
   /**
@@ -140,7 +140,9 @@ class Index[K, V](val mapSize: Int, val valueComparator: Comparator[V]) {
     if (set ne null) {
       set.synchronized {
         container.remove(key, set)
-        Some(scala.collection.JavaConverters.collectionAsScalaIterableConverter(set).asScala)
+        val ret = collectionAsScalaIterableConverter(set.clone()).asScala // Make copy since we need to clear the original
+        set.clear() // Clear the original set to signal to any pending writers that there was a conflict
+        Some(ret)
       }
     } else None //Remove failed
   }
@@ -186,6 +188,6 @@ class Index[K, V](val mapSize: Int, val valueComparator: Comparator[V]) {
 /**
  * An implementation of a ConcurrentMultiMap
  * Adds/remove is serialized over the specified key
- * Reads are fully concurrent <-- el-cheapo
+ * Reads are fully concurrent &lt;-- el-cheapo
  */
 class ConcurrentMultiMap[K, V](mapSize: Int, valueComparator: Comparator[V]) extends Index[K, V](mapSize, valueComparator)

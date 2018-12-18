@@ -1,23 +1,22 @@
-/**
- * Copyright (C) 2009when2012 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.camel
 
 import akka.camel.TestSupport.SharedCamelSystem
 import internal.DefaultCamel
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.Matchers
 import org.scalatest.mock.MockitoSugar
-import org.apache.camel.{ CamelContext, ProducerTemplate }
+import org.apache.camel.ProducerTemplate
 import org.scalatest.WordSpec
-import akka.event.LoggingAdapter
+import akka.event.MarkerLoggingAdapter
 import akka.actor.ActorSystem.Settings
 import com.typesafe.config.ConfigFactory
 import org.apache.camel.impl.DefaultCamelContext
-import org.apache.camel.spi.Registry
-import akka.actor.{ ExtendedActorSystem, ActorSystem }
+import akka.actor.ExtendedActorSystem
 
-class DefaultCamelTest extends WordSpec with SharedCamelSystem with MustMatchers with MockitoSugar {
+class DefaultCamelTest extends WordSpec with SharedCamelSystem with Matchers with MockitoSugar {
 
   import org.mockito.Mockito.{ when, verify }
   val sys = mock[ExtendedActorSystem]
@@ -27,7 +26,7 @@ class DefaultCamelTest extends WordSpec with SharedCamelSystem with MustMatchers
   when(sys.name) thenReturn ("mocksystem")
 
   def camelWithMocks = new DefaultCamel(sys) {
-    override val log = mock[LoggingAdapter]
+    override val log = mock[MarkerLoggingAdapter]
     override lazy val template = mock[ProducerTemplate]
     override lazy val context = mock[DefaultCamelContext]
     override val settings = mock[CamelSettings]
@@ -43,7 +42,7 @@ class DefaultCamelTest extends WordSpec with SharedCamelSystem with MustMatchers
     }
 
     "throws exception thrown by context.stop()" in {
-      exception.getMessage() must be("context");
+      exception.getMessage() should ===("context")
     }
 
     "tries to stop both template and context" in {

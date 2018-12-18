@@ -1,15 +1,18 @@
+/*
+ * Copyright (C) 2018 Lightbend Inc. <https://www.lightbend.com>
+ */
+
 package akka.actor.dispatch
 
 import language.postfixOps
 
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
-import java.util.concurrent.atomic.{ AtomicBoolean, AtomicInteger }
-import akka.testkit.{ filterEvents, EventFilter, AkkaSpec }
+import java.util.concurrent.atomic.{ AtomicBoolean }
+import akka.testkit.{ AkkaSpec }
 import akka.actor.{ Props, Actor }
 import scala.concurrent.Await
 import scala.concurrent.duration._
 import akka.testkit.DefaultTimeout
-import akka.dispatch.{ PinnedDispatcher, Dispatchers, Dispatcher }
 import akka.pattern.ask
 
 object DispatcherActorSpec {
@@ -20,8 +23,7 @@ object DispatcherActorSpec {
       throughput = 101
       executor = "thread-pool-executor"
       thread-pool-executor {
-        core-pool-size-min = 1
-        core-pool-size-max = 1
+        fixed-pool-size = 1
       }
     }
     test-throughput-deadline-dispatcher {
@@ -29,15 +31,14 @@ object DispatcherActorSpec {
       throughput-deadline-time = 100 milliseconds
       executor = "thread-pool-executor"
       thread-pool-executor {
-        core-pool-size-min = 1
-        core-pool-size-max = 1
+        fixed-pool-size = 1
       }
     }
 
     """
   class TestActor extends Actor {
     def receive = {
-      case "Hello"   ⇒ sender ! "World"
+      case "Hello"   ⇒ sender() ! "World"
       case "Failure" ⇒ throw new RuntimeException("Expected exception; to test fault-tolerance")
     }
   }
@@ -52,7 +53,6 @@ object DispatcherActorSpec {
   }
 }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class DispatcherActorSpec extends AkkaSpec(DispatcherActorSpec.config) with DefaultTimeout {
   import DispatcherActorSpec._
 
@@ -86,7 +86,7 @@ class DispatcherActorSpec extends AkkaSpec(DispatcherActorSpec.config) with Defa
       val slowOne = system.actorOf(
         Props(new Actor {
           def receive = {
-            case "hogexecutor" ⇒ sender ! "OK"; start.await
+            case "hogexecutor" ⇒ { sender() ! "OK"; start.await }
             case "ping"        ⇒ if (works.get) latch.countDown()
           }
         }).withDispatcher(throughputDispatcher))
@@ -98,7 +98,7 @@ class DispatcherActorSpec extends AkkaSpec(DispatcherActorSpec.config) with Defa
       latch.await(10, TimeUnit.SECONDS)
       system.stop(fastOne)
       system.stop(slowOne)
-      assert(latch.getCount() === 0)
+      assert(latch.getCount() === 0L)
     }
 
     "respect throughput deadline" in {
@@ -120,8 +120,8 @@ class DispatcherActorSpec extends AkkaSpec(DispatcherActorSpec.config) with Defa
       val slowOne = system.actorOf(
         Props(new Actor {
           def receive = {
-            case "hogexecutor" ⇒ ready.countDown(); start.await
-            case "ping"        ⇒ works.set(false); context.stop(self)
+            case "hogexecutor" ⇒ { ready.countDown(); start.await }
+            case "ping"        ⇒ { works.set(false); context.stop(self) }
           }
         }).withDispatcher(throughputDispatcher))
 

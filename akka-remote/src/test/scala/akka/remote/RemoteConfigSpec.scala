@@ -1,80 +1,102 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote
 
 import language.postfixOps
 import akka.testkit.AkkaSpec
-import akka.actor.ExtendedActorSystem
 import scala.concurrent.duration._
 import akka.remote.transport.AkkaProtocolSettings
-import akka.util.{ Timeout, Helpers }
-import akka.remote.transport.netty.SSLSettings
+import akka.util.{ Helpers }
+import akka.util.Helpers.ConfigOps
+import akka.remote.transport.netty.{ NettyTransportSettings, SSLSettings }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class RemoteConfigSpec extends AkkaSpec(
   """
-    akka.actor.provider = "akka.remote.RemoteActorRefProvider"
+    akka.actor.provider = remote
     akka.remote.netty.tcp.port = 0
   """) {
 
-  "Remoting" must {
+  "Remoting" should {
 
     "contain correct configuration values in reference.conf" in {
       val remoteSettings = RARP(system).provider.remoteSettings
       import remoteSettings._
 
-      LogReceive must be(false)
-      LogSend must be(false)
-      UntrustedMode must be(false)
-      LogRemoteLifecycleEvents must be(true)
-      ShutdownTimeout.duration must be(10 seconds)
-      FlushWait must be(2 seconds)
-      StartupTimeout.duration must be(10 seconds)
-      RetryGateClosedFor must be(Duration.Zero)
-      UnknownAddressGateClosedFor must be(1 minute)
-      UsePassiveConnections must be(true)
-      MaximumRetriesInWindow must be(5)
-      RetryWindow must be(3 seconds)
-      BackoffPeriod must be(10 millis)
-      SysMsgAckTimeout must be(0.3 seconds)
-      SysResendTimeout must be(1 seconds)
-      SysMsgBufferSize must be(1000)
-      QuarantineDuration must be(60 seconds)
-      CommandAckTimeout.duration must be(30 seconds)
-      Transports.size must be(1)
-      Transports.head._1 must be(classOf[akka.remote.transport.netty.NettyTransport].getName)
-      Transports.head._2 must be(Nil)
-      Adapters must be(Map(
-        "gremlin" -> classOf[akka.remote.transport.FailureInjectorProvider].getName,
-        "trttl" -> classOf[akka.remote.transport.ThrottlerProvider].getName))
+      LogReceive should ===(false)
+      LogSend should ===(false)
+      UntrustedMode should ===(false)
+      TrustedSelectionPaths should ===(Set.empty[String])
+      ShutdownTimeout.duration should ===(10 seconds)
+      FlushWait should ===(2 seconds)
+      StartupTimeout.duration should ===(10 seconds)
+      RetryGateClosedFor should ===(5 seconds)
+      Dispatcher should ===("akka.remote.default-remote-dispatcher")
+      UsePassiveConnections should ===(true)
+      BackoffPeriod should ===(5 millis)
+      LogBufferSizeExceeding should ===(50000)
+      SysMsgAckTimeout should ===(0.3 seconds)
+      SysResendTimeout should ===(2 seconds)
+      SysResendLimit should ===(200)
+      SysMsgBufferSize should ===(20000)
+      InitialSysMsgDeliveryTimeout should ===(3 minutes)
+      QuarantineDuration should ===(5 days)
+      CommandAckTimeout.duration should ===(30 seconds)
+      Transports.size should ===(1)
+      Transports.head._1 should ===(classOf[akka.remote.transport.netty.NettyTransport].getName)
+      Transports.head._2 should ===(Nil)
+      Adapters should ===(Map(
+        "gremlin" → classOf[akka.remote.transport.FailureInjectorProvider].getName,
+        "trttl" → classOf[akka.remote.transport.ThrottlerProvider].getName))
 
-      WatchFailureDetectorImplementationClass must be(classOf[PhiAccrualFailureDetector].getName)
-      WatchHeartBeatInterval must be(1 seconds)
-      WatchNumberOfEndHeartbeatRequests must be(8)
-      WatchHeartbeatExpectedResponseAfter must be(3 seconds)
-      WatchUnreachableReaperInterval must be(1 second)
-      WatchFailureDetectorConfig.getDouble("threshold") must be(10.0 plusOrMinus 0.0001)
-      WatchFailureDetectorConfig.getInt("max-sample-size") must be(200)
-      Duration(WatchFailureDetectorConfig.getMilliseconds("acceptable-heartbeat-pause"), MILLISECONDS) must be(4 seconds)
-      Duration(WatchFailureDetectorConfig.getMilliseconds("min-std-deviation"), MILLISECONDS) must be(100 millis)
+      WatchFailureDetectorImplementationClass should ===(classOf[PhiAccrualFailureDetector].getName)
+      WatchHeartBeatInterval should ===(1 seconds)
+      WatchHeartbeatExpectedResponseAfter should ===(1 seconds)
+      WatchUnreachableReaperInterval should ===(1 second)
+      WatchFailureDetectorConfig.getDouble("threshold") should ===(10.0 +- 0.0001)
+      WatchFailureDetectorConfig.getInt("max-sample-size") should ===(200)
+      WatchFailureDetectorConfig.getMillisDuration("acceptable-heartbeat-pause") should ===(10 seconds)
+      WatchFailureDetectorConfig.getMillisDuration("min-std-deviation") should ===(100 millis)
 
+      remoteSettings.config.getString("akka.remote.log-frame-size-exceeding") should ===("off")
     }
 
     "be able to parse AkkaProtocol related config elements" in {
       val settings = new AkkaProtocolSettings(RARP(system).provider.remoteSettings.config)
       import settings._
 
-      RequireCookie must be(false)
-      SecureCookie must be === None
+      RequireCookie should ===(false)
+      SecureCookie should ===(None)
 
-      TransportFailureDetectorImplementationClass must be(classOf[PhiAccrualFailureDetector].getName)
-      TransportHeartBeatInterval must be === 1.seconds
-      TransportFailureDetectorConfig.getDouble("threshold") must be(7.0 plusOrMinus 0.0001)
-      TransportFailureDetectorConfig.getInt("max-sample-size") must be(100)
-      Duration(TransportFailureDetectorConfig.getMilliseconds("acceptable-heartbeat-pause"), MILLISECONDS) must be(3 seconds)
-      Duration(TransportFailureDetectorConfig.getMilliseconds("min-std-deviation"), MILLISECONDS) must be(100 millis)
+      TransportFailureDetectorImplementationClass should ===(classOf[DeadlineFailureDetector].getName)
+      TransportHeartBeatInterval should ===(4.seconds)
+      TransportFailureDetectorConfig.getMillisDuration("acceptable-heartbeat-pause") should ===(120.seconds)
 
+    }
+
+    "contain correct netty.tcp values in reference.conf" in {
+      val c = RARP(system).provider.remoteSettings.config.getConfig("akka.remote.netty.tcp")
+      val s = new NettyTransportSettings(c)
+      import s._
+
+      ConnectionTimeout should ===(15.seconds)
+      ConnectionTimeout should ===(new AkkaProtocolSettings(RARP(system).provider.remoteSettings.config)
+        .HandshakeTimeout)
+      WriteBufferHighWaterMark should ===(None)
+      WriteBufferLowWaterMark should ===(None)
+      SendBufferSize should ===(Some(256000))
+      ReceiveBufferSize should ===(Some(256000))
+      MaxFrameSize should ===(128000)
+      Backlog should ===(4096)
+      TcpNodelay should ===(true)
+      TcpKeepalive should ===(true)
+      TcpReuseAddr should ===(!Helpers.isWindows)
+      c.getString("hostname") should ===("")
+      c.getString("bind-hostname") should ===("")
+      c.getString("bind-port") should ===("")
+      ServerSocketWorkerPoolSize should ===(2)
+      ClientSocketWorkerPoolSize should ===(2)
     }
 
     "contain correct socket worker pool configuration values in reference.conf" in {
@@ -83,32 +105,37 @@ class RemoteConfigSpec extends AkkaSpec(
       // server-socket-worker-pool
       {
         val pool = c.getConfig("server-socket-worker-pool")
-        pool.getInt("pool-size-min") must equal(2)
+        pool.getInt("pool-size-min") should ===(2)
 
-        pool.getDouble("pool-size-factor") must equal(1.0)
-        pool.getInt("pool-size-max") must equal(8)
+        pool.getDouble("pool-size-factor") should ===(1.0)
+        pool.getInt("pool-size-max") should ===(2)
       }
 
       // client-socket-worker-pool
       {
         val pool = c.getConfig("client-socket-worker-pool")
-        pool.getInt("pool-size-min") must equal(2)
-        pool.getDouble("pool-size-factor") must equal(1.0)
-        pool.getInt("pool-size-max") must equal(8)
+        pool.getInt("pool-size-min") should ===(2)
+        pool.getDouble("pool-size-factor") should ===(1.0)
+        pool.getInt("pool-size-max") should ===(2)
       }
 
     }
 
     "contain correct ssl configuration values in reference.conf" in {
       val sslSettings = new SSLSettings(system.settings.config.getConfig("akka.remote.netty.ssl.security"))
-      sslSettings.SSLKeyStore must be(Some("keystore"))
-      sslSettings.SSLKeyStorePassword must be(Some("changeme"))
-      sslSettings.SSLKeyPassword must be(Some("changeme"))
-      sslSettings.SSLTrustStore must be(Some("truststore"))
-      sslSettings.SSLTrustStorePassword must be(Some("changeme"))
-      sslSettings.SSLProtocol must be(Some("TLSv1"))
-      sslSettings.SSLEnabledAlgorithms must be(Set("TLS_RSA_WITH_AES_128_CBC_SHA"))
-      sslSettings.SSLRandomNumberGenerator must be(None)
+      sslSettings.SSLKeyStore should ===("keystore")
+      sslSettings.SSLKeyStorePassword should ===("changeme")
+      sslSettings.SSLKeyPassword should ===("changeme")
+      sslSettings.SSLTrustStore should ===("truststore")
+      sslSettings.SSLTrustStorePassword should ===("changeme")
+      sslSettings.SSLProtocol should ===("TLSv1.2")
+      sslSettings.SSLEnabledAlgorithms should ===(Set("TLS_RSA_WITH_AES_128_CBC_SHA"))
+      sslSettings.SSLRandomNumberGenerator should ===("")
+    }
+
+    "have debug logging of the failure injector turned off in reference.conf" in {
+      val c = RARP(system).provider.remoteSettings.config.getConfig("akka.remote.gremlin")
+      c.getBoolean("debug") should ===(false)
     }
   }
 }

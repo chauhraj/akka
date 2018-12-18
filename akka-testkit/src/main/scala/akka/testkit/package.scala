@@ -1,9 +1,8 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
-package akka
 
-import language.implicitConversions
+package akka
 
 import akka.actor.ActorSystem
 import scala.concurrent.duration.{ Duration, FiniteDuration }
@@ -21,8 +20,8 @@ package object testkit {
       val result = block
 
       val testKitSettings = TestKitExtension(system)
-      val stop = now + testKitSettings.TestEventFilterLeeway.toMillis
-      val failed = eventFilters filterNot (_.awaitDone(Duration(stop - now, MILLISECONDS))) map ("Timeout (" + testKitSettings.TestEventFilterLeeway + ") waiting for " + _)
+      val stop = now + testKitSettings.TestEventFilterLeeway.dilated.toMillis
+      val failed = eventFilters filterNot (_.awaitDone(Duration(stop - now, MILLISECONDS))) map ("Timeout (" + testKitSettings.TestEventFilterLeeway.dilated + ") waiting for " + _)
       if (failed.nonEmpty)
         throw new AssertionError("Filter completion error:\n" + failed.mkString("\n"))
 
@@ -39,12 +38,17 @@ package object testkit {
   /**
    * Scala API. Scale timeouts (durations) during tests with the configured
    * 'akka.test.timefactor'.
-   * Implicit conversion to add dilated function to Duration.
+   * Implicit class providing `dilated` method.
+   * {{{
    * import scala.concurrent.duration._
    * import akka.testkit._
    * 10.milliseconds.dilated
-   *
-   * Corresponding Java API is available in TestKit.dilated
+   * }}}
+   * Corresponding Java API is available in JavaTestKit.dilated()
    */
-  implicit def duration2TestDuration(duration: FiniteDuration) = new TestDuration(duration)
+  implicit class TestDuration(val duration: FiniteDuration) extends AnyVal {
+    def dilated(implicit system: ActorSystem): FiniteDuration =
+      Duration.fromNanos((duration.toNanos * TestKitExtension(system).TestTimeFactor + 0.5).toLong)
+  }
+
 }

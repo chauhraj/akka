@@ -1,19 +1,18 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote
 
+import akka.actor._
+import akka.dispatch.sysmsg.{ DeathWatchNotification, Watch }
+import akka.dispatch.{ RequiresMessageQueue, UnboundedMessageQueueSemantics }
+import akka.event.AddressTerminatedTopic
+import akka.remote.artery.ArteryMessage
+import scala.collection.mutable
 import scala.concurrent.duration._
-import akka.actor.Actor
-import akka.actor.ActorLogging
-import akka.actor.ActorRef
-import akka.actor.Address
-import akka.actor.AddressTerminated
-import akka.actor.Props
-import akka.actor.RootActorPath
-import akka.actor.Terminated
-import akka.actor.ExtendedActorSystem
-import akka.ConfigurationException
+
+import akka.remote.artery.ArteryTransport
 
 /**
  * INTERNAL API
@@ -24,39 +23,43 @@ private[akka] object RemoteWatcher {
    * Factory method for `RemoteWatcher` [[akka.actor.Props]].
    */
   def props(
-    failureDetector: FailureDetectorRegistry[Address],
-    heartbeatInterval: FiniteDuration,
-    unreachableReaperInterval: FiniteDuration,
-    heartbeatExpectedResponseAfter: FiniteDuration,
-    numberOfEndHeartbeatRequests: Int): Props =
+    failureDetector:                FailureDetectorRegistry[Address],
+    heartbeatInterval:              FiniteDuration,
+    unreachableReaperInterval:      FiniteDuration,
+    heartbeatExpectedResponseAfter: FiniteDuration): Props =
     Props(classOf[RemoteWatcher], failureDetector, heartbeatInterval, unreachableReaperInterval,
-      heartbeatExpectedResponseAfter, numberOfEndHeartbeatRequests)
+      heartbeatExpectedResponseAfter).withDeploy(Deploy.local)
 
-  case class WatchRemote(watchee: ActorRef, watcher: ActorRef)
-  case class UnwatchRemote(watchee: ActorRef, watcher: ActorRef)
+  final case class WatchRemote(watchee: InternalActorRef, watcher: InternalActorRef)
+  final case class UnwatchRemote(watchee: InternalActorRef, watcher: InternalActorRef)
 
-  @SerialVersionUID(1L) case object HeartbeatRequest
-  @SerialVersionUID(1L) case object EndHeartbeatRequest
-  @SerialVersionUID(1L) case class Heartbeat(addressUid: Int)
+  @SerialVersionUID(1L) case object Heartbeat extends HeartbeatMessage
+  @SerialVersionUID(1L) final case class HeartbeatRsp(addressUid: Int) extends HeartbeatMessage
+
+  // specific pair of messages for artery to allow for protobuf serialization and long uid
+  case object ArteryHeartbeat extends HeartbeatMessage with ArteryMessage
+  final case class ArteryHeartbeatRsp(uid: Long) extends HeartbeatMessage with ArteryMessage
 
   // sent to self only
   case object HeartbeatTick
   case object ReapUnreachableTick
-  case class ExpectedFirstHeartbeat(from: Address)
+  final case class ExpectedFirstHeartbeat(from: Address)
 
   // test purpose
   object Stats {
-    lazy val empty: Stats = counts(0, 0, 0)
-    def counts(watching: Int, watchingNodes: Int, watchedByNodes: Int): Stats =
-      new Stats(watching, watchingNodes, watchedByNodes)(Set.empty)
+    lazy val empty: Stats = counts(0, 0)
+    def counts(watching: Int, watchingNodes: Int): Stats = Stats(watching, watchingNodes)(Set.empty, Set.empty)
   }
-  case class Stats(watching: Int, watchingNodes: Int, watchedByNodes: Int)(val watchingRefs: Set[(ActorRef, ActorRef)]) {
+  final case class Stats(watching: Int, watchingNodes: Int)(
+    val watchingRefs:      Set[(ActorRef, ActorRef)],
+    val watchingAddresses: Set[Address]) {
     override def toString: String = {
       def formatWatchingRefs: String =
-        if (watchingRefs.isEmpty) ""
-        else ", watchingRefs=" + watchingRefs.map(x ⇒ x._2.path.name + " -> " + x._1.path.name).mkString("[", ", ", "]")
+        watchingRefs.map(x ⇒ x._2.path.name + " -> " + x._1.path.name).mkString("[", ", ", "]")
+      def formatWatchingAddresses: String =
+        watchingAddresses.mkString("[", ", ", "]")
 
-      s"Stats(watching=${watching}, watchingNodes=${watchingNodes}, watchedByNodes=${watchedByNodes}${formatWatchingRefs})"
+      s"Stats(watching=$watching, watchingNodes=$watchingNodes, watchingRefs=$formatWatchingRefs, watchingAddresses=$formatWatchingAddresses)"
     }
   }
 }
@@ -69,52 +72,45 @@ private[akka] object RemoteWatcher {
  * intercepts Watch and Unwatch system messages and sends corresponding
  * [[RemoteWatcher.WatchRemote]] and [[RemoteWatcher.UnwatchRemote]] to this actor.
  *
- * For a new node to be watched this actor starts the monitoring by sending [[RemoteWatcher.HeartbeatRequest]]
- * to the peer actor on the other node, which then sends periodic [[RemoteWatcher.Heartbeat]]
- * messages back. The failure detector on the watching side monitors these heartbeat messages.
- * If arrival of hearbeat messages stops it will be detected and this actor will publish
- * [[akka.actor.AddressTerminated]] to the `eventStream`.
+ * For a new node to be watched this actor periodically sends `RemoteWatcher.Heartbeat`
+ * to the peer actor on the other node, which replies with [[RemoteWatcher.HeartbeatRsp]]
+ * message back. The failure detector on the watching side monitors these heartbeat messages.
+ * If arrival of heartbeat messages stops it will be detected and this actor will publish
+ * [[akka.actor.AddressTerminated]] to the [[akka.event.AddressTerminatedTopic]].
  *
- * When all actors on a node have been unwatched, or terminated, this actor sends
- * [[RemoteWatcher.EndHeartbeatRequest]] messages to the peer actor on the other node,
- * which will then stop sending heartbeat messages.
- *
- * The actor sending heartbeat messages will also watch the peer on the other node,
- * to be able to stop sending heartbeat messages in case of network failure or JVM crash.
+ * When all actors on a node have been unwatched it will stop sending heartbeat messages.
  *
  * For bi-directional watch between two nodes the same thing will be established in
  * both directions, but independent of each other.
  *
  */
 private[akka] class RemoteWatcher(
-  failureDetector: FailureDetectorRegistry[Address],
-  heartbeatInterval: FiniteDuration,
-  unreachableReaperInterval: FiniteDuration,
-  heartbeatExpectedResponseAfter: FiniteDuration,
-  numberOfEndHeartbeatRequests: Int)
-  extends Actor with ActorLogging {
+  failureDetector:                FailureDetectorRegistry[Address],
+  heartbeatInterval:              FiniteDuration,
+  unreachableReaperInterval:      FiniteDuration,
+  heartbeatExpectedResponseAfter: FiniteDuration)
+  extends Actor with ActorLogging with RequiresMessageQueue[UnboundedMessageQueueSemantics] {
 
   import RemoteWatcher._
   import context.dispatcher
   def scheduler = context.system.scheduler
 
-  val remoteProvider: RemoteActorRefProvider = context.system.asInstanceOf[ExtendedActorSystem].provider match {
-    case rarp: RemoteActorRefProvider ⇒ rarp
-    case other ⇒ throw new ConfigurationException(
-      s"ActorSystem [${context.system}] needs to have a 'RemoteActorRefProvider' enabled in the configuration, currently uses [${other.getClass.getName}]")
-  }
+  val remoteProvider: RemoteActorRefProvider = RARP(context.system).provider
+  val artery = remoteProvider.remoteSettings.Artery.Enabled
 
-  val selfHeartbeatMsg = Heartbeat(AddressUidExtension(context.system).addressUid)
+  val (heartBeatMsg, selfHeartbeatRspMsg) =
+    if (artery) (ArteryHeartbeat, ArteryHeartbeatRsp(AddressUidExtension(context.system).longAddressUid))
+    else (Heartbeat, HeartbeatRsp(AddressUidExtension(context.system).addressUid))
 
-  // actors that this node is watching, tuple with (watcher, watchee)
-  var watching: Set[(ActorRef, ActorRef)] = Set.empty
-  // nodes that this node is watching, i.e. expecting hearteats from these nodes
-  var watchingNodes: Set[Address] = Set.empty
-  // heartbeats will be sent to watchedByNodes, ref is RemoteWatcher at other side
-  var watchedByNodes: Set[ActorRef] = Set.empty
+  // actors that this node is watching, map of watchee -> Set(watchers)
+  val watching = new mutable.HashMap[InternalActorRef, mutable.Set[InternalActorRef]]() with mutable.MultiMap[InternalActorRef, InternalActorRef]
+
+  // nodes that this node is watching, i.e. expecting heartbeats from these nodes. Map of address -> Set(watchee) on this address
+  val watcheeByNodes = new mutable.HashMap[Address, mutable.Set[InternalActorRef]]() with mutable.MultiMap[Address, InternalActorRef]
+  def watchingNodes = watcheeByNodes.keySet
+
   var unreachable: Set[Address] = Set.empty
-  var endWatchingNodes: Map[Address, Int] = Map.empty
-  var addressUids: Map[Address, Int] = Map.empty
+  var addressUids: Map[Address, Long] = Map.empty
 
   val heartbeatTask = scheduler.schedule(heartbeatInterval, heartbeatInterval, self, HeartbeatTick)
   val failureDetectorReaperTask = scheduler.schedule(unreachableReaperInterval, unreachableReaperInterval,
@@ -127,187 +123,173 @@ private[akka] class RemoteWatcher(
   }
 
   def receive = {
-    case HeartbeatTick ⇒
-      sendHeartbeat()
-      sendHeartbeatRequest()
-      sendEndHeartbeatRequest()
-    case Heartbeat(uid)                  ⇒ heartbeat(uid)
-    case ReapUnreachableTick             ⇒ reapUnreachable()
-    case HeartbeatRequest                ⇒ heartbeatRequest()
-    case EndHeartbeatRequest             ⇒ endHeartbeatRequest()
-    case ExpectedFirstHeartbeat(from)    ⇒ triggerFirstHeartbeat(from)
-    case WatchRemote(watchee, watcher)   ⇒ watchRemote(watchee, watcher)
-    case UnwatchRemote(watchee, watcher) ⇒ unwatchRemote(watchee, watcher)
-    case Terminated(watchee)             ⇒ terminated(watchee)
+    case HeartbeatTick                             ⇒ sendHeartbeat()
+    case Heartbeat | ArteryHeartbeat               ⇒ receiveHeartbeat()
+    case HeartbeatRsp(uid)                         ⇒ receiveHeartbeatRsp(uid.toLong)
+    case ArteryHeartbeatRsp(uid)                   ⇒ receiveHeartbeatRsp(uid)
+    case ReapUnreachableTick                       ⇒ reapUnreachable()
+    case ExpectedFirstHeartbeat(from)              ⇒ triggerFirstHeartbeat(from)
+    case WatchRemote(watchee, watcher)             ⇒ addWatch(watchee, watcher)
+    case UnwatchRemote(watchee, watcher)           ⇒ removeWatch(watchee, watcher)
+    case t @ Terminated(watchee: InternalActorRef) ⇒ terminated(watchee, t.existenceConfirmed, t.addressTerminated)
 
     // test purpose
     case Stats ⇒
-      sender ! Stats(
-        watching = watching.size,
-        watchingNodes = watchingNodes.size,
-        watchedByNodes = watchedByNodes.size)(watching)
+      val watchSet = watching.iterator.flatMap { case (wee, wers) ⇒ wers.map { wer ⇒ wee → wer } }.toSet[(ActorRef, ActorRef)]
+      sender() ! Stats(
+        watching = watchSet.size,
+        watchingNodes = watchingNodes.size)(watchSet, watchingNodes.toSet)
   }
 
-  def heartbeat(uid: Int): Unit = {
-    val from = sender.path.address
+  def receiveHeartbeat(): Unit =
+    sender() ! selfHeartbeatRspMsg
+
+  def receiveHeartbeatRsp(uid: Long): Unit = {
+    val from = sender().path.address
 
     if (failureDetector.isMonitoring(from))
-      log.debug("Received heartbeat from [{}]", from)
+      log.debug("Received heartbeat rsp from [{}]", from)
     else
-      log.debug("Received first heartbeat from [{}]", from)
+      log.debug("Received first heartbeat rsp from [{}]", from)
 
-    if (watchingNodes(from) && !unreachable(from)) {
-      addressUids += (from -> uid)
+    if (watcheeByNodes.contains(from) && !unreachable(from)) {
+      if (!addressUids.contains(from) || addressUids(from) != uid)
+        reWatch(from)
+      addressUids += (from → uid)
       failureDetector.heartbeat(from)
     }
-  }
-
-  def heartbeatRequest(): Unit = {
-    // request to start sending heartbeats to the node
-    log.debug("Received HeartbeatRequest from [{}]", sender.path.address)
-    watchedByNodes += sender
-    // watch back to stop heartbeating if other side dies
-    context watch sender
-    watching += ((sender, self))
-  }
-
-  def endHeartbeatRequest(): Unit = {
-    // request to stop sending heartbeats to the node
-    log.debug("Received EndHeartbeatRequest from [{}]", sender.path.address)
-    watchedByNodes -= sender
-    context unwatch sender
-    watching -= ((sender, self))
-    checkLastUnwatchOfNode(sender.path.address)
   }
 
   def reapUnreachable(): Unit =
     watchingNodes foreach { a ⇒
       if (!unreachable(a) && !failureDetector.isAvailable(a)) {
         log.warning("Detected unreachable: [{}]", a)
-        addressUids.get(a) foreach { uid ⇒ quarantine(a, uid) }
+        quarantine(a, addressUids.get(a), "Deemed unreachable by remote failure detector", harmless = false)
         publishAddressTerminated(a)
         unreachable += a
       }
     }
 
   def publishAddressTerminated(address: Address): Unit =
-    context.system.eventStream.publish(AddressTerminated(address))
+    AddressTerminatedTopic(context.system).publish(AddressTerminated(address))
 
-  def quarantine(address: Address, uid: Int): Unit =
-    remoteProvider.quarantine(address, uid)
-
-  def watchRemote(watchee: ActorRef, watcher: ActorRef): Unit =
-    if (watchee.path.uid == akka.actor.ActorCell.undefinedUid)
-      logActorForDeprecationWarning(watchee)
-    else if (watcher != self) {
-      log.debug("Watching: [{} -> {}]", watcher.path, watchee.path)
-      watching += ((watchee, watcher))
-      val watcheeAddress = watchee.path.address
-      if (!watchingNodes(watcheeAddress) && unreachable(watcheeAddress)) {
-        // first watch to that node after a previous unreachable
-        unreachable -= watcheeAddress
-        failureDetector.remove(watcheeAddress)
-      }
-      watchingNodes += watcheeAddress
-      endWatchingNodes -= watcheeAddress
-
-      // also watch from self, to be able to cleanup on termination of the watchee
-      context watch watchee
-      watching += ((watchee, self))
-    }
-
-  def unwatchRemote(watchee: ActorRef, watcher: ActorRef): Unit =
-    if (watchee.path.uid == akka.actor.ActorCell.undefinedUid)
-      logActorForDeprecationWarning(watchee)
-    else if (watcher != self) {
-      log.debug("Unwatching: [{} -> {}]", watcher.path, watchee.path)
-      watching -= ((watchee, watcher))
-
-      // clean up self watch when no more watchers of this watchee
-      if (watching.forall { case (wee, wer) ⇒ wee != watchee || wer == self }) {
-        log.debug("Cleanup self watch of [{}]", watchee.path)
-        context unwatch watchee
-        watching -= ((watchee, self))
-      }
-      checkLastUnwatchOfNode(watchee.path.address)
-    }
-
-  def logActorForDeprecationWarning(watchee: ActorRef): Unit = {
-    log.debug("actorFor is deprecated, and watching a remote ActorRef acquired with actorFor is not reliable: [{}]", watchee.path)
-  }
-
-  def terminated(watchee: ActorRef): Unit = {
-    if (matchingPathElements(self, watchee)) {
-      log.debug("Other side terminated: [{}]", watchee.path)
-      // stop heartbeating to that node immediately, and cleanup
-      watchedByNodes -= watchee
-      watching -= ((watchee, self))
-    } else {
-      log.debug("Watchee terminated: [{}]", watchee.path)
-      watching = watching.filterNot {
-        case (wee, _) ⇒ wee == watchee
-      }
-      checkLastUnwatchOfNode(watchee.path.address)
+  def quarantine(address: Address, uid: Option[Long], reason: String, harmless: Boolean): Unit = {
+    remoteProvider.transport match {
+      case t: ArteryTransport if harmless ⇒ t.quarantine(address, uid, reason, harmless)
+      case _                              ⇒ remoteProvider.quarantine(address, uid, reason)
     }
   }
 
-  def checkLastUnwatchOfNode(watcheeAddress: Address): Unit = {
-    if (watchingNodes(watcheeAddress) && watching.forall {
-      case (wee, wer) ⇒ wee.path.address != watcheeAddress || (wer == self && matchingPathElements(self, wee))
-    }) {
-      // unwatched last watchee on that node, not counting RemoteWatcher peer
-      log.debug("Unwatched last watchee of node: [{}]", watcheeAddress)
-      watchingNodes -= watcheeAddress
-      addressUids -= watcheeAddress
-      // continue by sending EndHeartbeatRequest for a while
-      endWatchingNodes += (watcheeAddress -> 0)
+  def addWatch(watchee: InternalActorRef, watcher: InternalActorRef): Unit = {
+    assert(watcher != self)
+    log.debug("Watching: [{} -> {}]", watcher.path, watchee.path)
+    watching.addBinding(watchee, watcher)
+    watchNode(watchee)
+
+    // add watch from self, this will actually send a Watch to the target when necessary
+    context watch watchee
+  }
+
+  def watchNode(watchee: InternalActorRef): Unit = {
+    val watcheeAddress = watchee.path.address
+    if (!watcheeByNodes.contains(watcheeAddress) && unreachable(watcheeAddress)) {
+      // first watch to that node after a previous unreachable
+      unreachable -= watcheeAddress
       failureDetector.remove(watcheeAddress)
     }
+    watcheeByNodes.addBinding(watcheeAddress, watchee)
   }
 
-  def matchingPathElements(a: ActorRef, b: ActorRef): Boolean =
-    a.path.elements == b.path.elements
+  def removeWatch(watchee: InternalActorRef, watcher: InternalActorRef): Unit = {
+    assert(watcher != self)
+    log.debug("Unwatching: [{} -> {}]", watcher.path, watchee.path)
+
+    // Could have used removeBinding, but it does not tell if this was the last entry. This saves a contains call.
+    watching.get(watchee) match {
+      case Some(watchers) ⇒
+        watchers -= watcher
+        if (watchers.isEmpty) {
+          // clean up self watch when no more watchers of this watchee
+          log.debug("Cleanup self watch of [{}]", watchee.path)
+          context unwatch watchee
+          removeWatchee(watchee)
+        }
+      case None ⇒
+    }
+  }
+
+  def removeWatchee(watchee: InternalActorRef): Unit = {
+    val watcheeAddress = watchee.path.address
+    watching -= watchee
+    // Could have used removeBinding, but it does not tell if this was the last entry. This saves a contains call.
+    watcheeByNodes.get(watcheeAddress) match {
+      case Some(watchees) ⇒
+        watchees -= watchee
+        if (watchees.isEmpty) {
+          // unwatched last watchee on that node
+          log.debug("Unwatched last watchee of node: [{}]", watcheeAddress)
+          unwatchNode(watcheeAddress)
+        }
+      case None ⇒
+    }
+  }
+
+  def unwatchNode(watcheeAddress: Address): Unit = {
+    watcheeByNodes -= watcheeAddress
+    addressUids -= watcheeAddress
+    failureDetector.remove(watcheeAddress)
+  }
+
+  def terminated(watchee: InternalActorRef, existenceConfirmed: Boolean, addressTerminated: Boolean): Unit = {
+    log.debug("Watchee terminated: [{}]", watchee.path)
+
+    // When watchee is stopped it sends DeathWatchNotification to this RemoteWatcher,
+    // which will propagate it to all watchers of this watchee.
+    // addressTerminated case is already handled by the watcher itself in DeathWatch trait
+    if (!addressTerminated)
+      for {
+        watchers ← watching.get(watchee)
+        watcher ← watchers
+      } watcher.sendSystemMessage(DeathWatchNotification(watchee, existenceConfirmed, addressTerminated))
+
+    removeWatchee(watchee)
+  }
 
   def sendHeartbeat(): Unit =
-    watchedByNodes foreach { ref ⇒
-      val a = ref.path.address
+    watchingNodes foreach { a ⇒
       if (!unreachable(a)) {
-        log.debug("Sending Heartbeat to [{}]", ref.path.address)
-        ref ! selfHeartbeatMsg
-      }
-    }
-
-  def sendHeartbeatRequest(): Unit =
-    watchingNodes.foreach { a ⇒
-      if (!unreachable(a) && !failureDetector.isMonitoring(a)) {
-        log.debug("Sending HeartbeatRequest to [{}]", a)
-        context.actorSelection(RootActorPath(a) / self.path.elements) ! HeartbeatRequest
-        // schedule the expected heartbeat for later, which will give the
-        // other side a chance to start heartbeating, and also trigger some resends of
-        // the heartbeat request
-        scheduler.scheduleOnce(heartbeatExpectedResponseAfter, self, ExpectedFirstHeartbeat(a))
-        endWatchingNodes -= a
-      }
-    }
-
-  def sendEndHeartbeatRequest(): Unit =
-    endWatchingNodes.foreach {
-      case (a, count) ⇒
-        if (!unreachable(a)) {
-          log.debug("Sending EndHeartbeatRequest to [{}]", a)
-          context.actorSelection(RootActorPath(a) / self.path.elements) ! EndHeartbeatRequest
-        }
-        if (count == numberOfEndHeartbeatRequests - 1) {
-          endWatchingNodes -= a
+        if (failureDetector.isMonitoring(a)) {
+          log.debug("Sending Heartbeat to [{}]", a)
         } else {
-          endWatchingNodes += (a -> (count + 1))
+          log.debug("Sending first Heartbeat to [{}]", a)
+          // schedule the expected first heartbeat for later, which will give the
+          // other side a chance to reply, and also trigger some resends if needed
+          scheduler.scheduleOnce(heartbeatExpectedResponseAfter, self, ExpectedFirstHeartbeat(a))
         }
+        context.actorSelection(RootActorPath(a) / self.path.elements) ! heartBeatMsg
+      }
     }
 
   def triggerFirstHeartbeat(address: Address): Unit =
-    if (watchingNodes(address) && !failureDetector.isMonitoring(address)) {
+    if (watcheeByNodes.contains(address) && !failureDetector.isMonitoring(address)) {
       log.debug("Trigger extra expected heartbeat from [{}]", address)
       failureDetector.heartbeat(address)
     }
 
+  /**
+   * To ensure that we receive heartbeat messages from the right actor system
+   * incarnation we send Watch again for the first HeartbeatRsp (containing
+   * the system UID) and if HeartbeatRsp contains a new system UID.
+   * Terminated will be triggered if the watchee (including correct Actor UID)
+   * does not exist.
+   */
+  def reWatch(address: Address): Unit =
+    for {
+      watchees ← watcheeByNodes.get(address)
+      watchee ← watchees
+    } {
+      val watcher = self.asInstanceOf[InternalActorRef]
+      log.debug("Re-watch [{} -> {}]", watcher.path, watchee.path)
+      watchee.sendSystemMessage(Watch(watchee, watcher)) // ➡➡➡ NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS ⬅⬅⬅
+    }
 }

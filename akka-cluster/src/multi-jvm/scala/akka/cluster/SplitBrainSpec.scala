@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import language.postfixOps
@@ -10,12 +11,10 @@ import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
 import scala.concurrent.duration._
-import akka.actor.Address
 import scala.concurrent.duration._
-import scala.collection.immutable
 import akka.remote.transport.ThrottlerTransportAdapter.Direction
 
-case class SplitBrainMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
+final case class SplitBrainMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
   val first = role("first")
   val second = role("second")
   val third = role("third")
@@ -26,7 +25,7 @@ case class SplitBrainMultiNodeConfig(failureDetectorPuppet: Boolean) extends Mul
     withFallback(ConfigFactory.parseString("""
         akka.remote.retry-gate-closed-for = 3 s
         akka.cluster {
-          auto-down = on
+          auto-down-unreachable-after = 1s
           failure-detector.threshold = 4
         }""")).
     withFallback(MultiNodeClusterSpec.clusterConfig(failureDetectorPuppet)))
@@ -68,7 +67,6 @@ abstract class SplitBrainSpec(multiNodeConfig: SplitBrainMultiNodeConfig)
     }
 
     "detect network partition and mark nodes on other side as unreachable and form new cluster" taggedAs LongRunningTest in within(30 seconds) {
-      val thirdAddress = address(third)
       enterBarrier("before-split")
 
       runOn(first) {
@@ -79,21 +77,16 @@ abstract class SplitBrainSpec(multiNodeConfig: SplitBrainMultiNodeConfig)
       }
       enterBarrier("after-split")
 
-      runOn(side1.last) {
-        for (role ← side2) markNodeAsUnavailable(role)
-      }
-      runOn(side2.last) {
-        for (role ← side1) markNodeAsUnavailable(role)
-      }
-
       runOn(side1: _*) {
-        // auto-down = on
+        for (role ← side2) markNodeAsUnavailable(role)
+        // auto-down
         awaitMembersUp(side1.size, side2.toSet map address)
         assertLeader(side1: _*)
       }
 
       runOn(side2: _*) {
-        // auto-down = on
+        for (role ← side1) markNodeAsUnavailable(role)
+        // auto-down
         awaitMembersUp(side2.size, side1.toSet map address)
         assertLeader(side2: _*)
       }

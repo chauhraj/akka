@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.pattern
@@ -8,8 +8,6 @@ import akka.actor._
 import akka.util.{ Timeout }
 import akka.dispatch.sysmsg.{ Unwatch, Watch }
 import scala.concurrent.Future
-import scala.concurrent.duration.Duration
-import scala.util.Success
 import scala.concurrent.duration.FiniteDuration
 
 trait GracefulStopSupport {
@@ -37,7 +35,7 @@ trait GracefulStopSupport {
    * If the target actor isn't terminated within the timeout the [[scala.concurrent.Future]]
    * is completed with failure [[akka.pattern.AskTimeoutException]].
    *
-   * If you want to invoke specalized stopping logic on your target actor instead of PoisonPill, you can pass your
+   * If you want to invoke specialized stopping logic on your target actor instead of PoisonPill, you can pass your
    * stop command as a parameter:
    * {{{
    *   gracefulStop(someChild, timeout, MyStopGracefullyMessage).onComplete {
@@ -46,18 +44,15 @@ trait GracefulStopSupport {
    * }}}
    */
   def gracefulStop(target: ActorRef, timeout: FiniteDuration, stopMessage: Any = PoisonPill): Future[Boolean] = {
-    if (target.isTerminated) Future successful true
-    else {
-      val internalTarget = target.asInstanceOf[InternalActorRef]
-      val ref = PromiseActorRef(internalTarget.provider, Timeout(timeout))
-      internalTarget.sendSystemMessage(Watch(internalTarget, ref))
-      target.tell(stopMessage, Actor.noSender)
-      ref.result.future.transform(
-        {
-          case Terminated(t) if t.path == target.path ⇒ true
-          case _                                      ⇒ { internalTarget.sendSystemMessage(Unwatch(target, ref)); false }
-        },
-        t ⇒ { internalTarget.sendSystemMessage(Unwatch(target, ref)); t })(ref.internalCallingThreadExecutionContext)
-    }
+    val internalTarget = target.asInstanceOf[InternalActorRef]
+    val ref = PromiseActorRef(internalTarget.provider, Timeout(timeout), target, stopMessage.getClass.getName)
+    internalTarget.sendSystemMessage(Watch(internalTarget, ref))
+    target.tell(stopMessage, Actor.noSender)
+    ref.result.future.transform(
+      {
+        case Terminated(t) if t.path == target.path ⇒ true
+        case _                                      ⇒ { internalTarget.sendSystemMessage(Unwatch(target, ref)); false }
+      },
+      t ⇒ { internalTarget.sendSystemMessage(Unwatch(target, ref)); t })(ref.internalCallingThreadExecutionContext)
   }
 }

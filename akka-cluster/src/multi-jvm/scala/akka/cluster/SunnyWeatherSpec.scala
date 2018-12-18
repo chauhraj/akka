@@ -1,14 +1,13 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import com.typesafe.config.ConfigFactory
-import org.scalatest.BeforeAndAfter
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import scala.concurrent.duration._
 import java.util.concurrent.atomic.AtomicReference
 import scala.collection.immutable.SortedSet
 import akka.actor.Props
@@ -23,15 +22,17 @@ object SunnyWeatherMultiJvmSpec extends MultiNodeConfig {
 
   // Note that this test uses default configuration,
   // not MultiNodeClusterSpec.clusterConfig
-  commonConfig(ConfigFactory.parseString("""
-    akka.actor.provider = akka.cluster.ClusterActorRefProvider
-    akka.cluster {
-      auto-join = off
+  commonConfig(ConfigFactory.parseString(
+    """
+    akka {
+      actor.provider = cluster
+      loggers = ["akka.testkit.TestEventListener"]
+      loglevel = INFO
+      remote.log-remote-lifecycle-events = off
+      cluster.failure-detector.monitored-by-nr-of-members = 3
     }
-    akka.loggers = ["akka.testkit.TestEventListener"]
-    akka.loglevel = INFO
-    akka.remote.log-remote-lifecycle-events = off
     """))
+
 }
 
 class SunnyWeatherMultiJvmNode1 extends SunnyWeatherSpec
@@ -40,11 +41,11 @@ class SunnyWeatherMultiJvmNode3 extends SunnyWeatherSpec
 class SunnyWeatherMultiJvmNode4 extends SunnyWeatherSpec
 class SunnyWeatherMultiJvmNode5 extends SunnyWeatherSpec
 
-abstract class SunnyWeatherSpec
-  extends MultiNodeSpec(SunnyWeatherMultiJvmSpec)
+abstract class SunnyWeatherSpec extends MultiNodeSpec(SunnyWeatherMultiJvmSpec)
   with MultiNodeClusterSpec {
 
   import SunnyWeatherMultiJvmSpec._
+
   import ClusterEvent._
 
   "A normal cluster" must {
@@ -72,7 +73,7 @@ abstract class SunnyWeatherSpec
 
       for (n ← 1 to 30) {
         enterBarrier("period-" + n)
-        unexpected.get must be(SortedSet.empty)
+        unexpected.get should ===(SortedSet.empty)
         awaitMembersUp(roles.size)
         assertLeaderIn(roles)
         if (n % 5 == 0) log.debug("Passed period [{}]", n)

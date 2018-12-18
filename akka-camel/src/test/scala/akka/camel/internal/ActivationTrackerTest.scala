@@ -1,24 +1,26 @@
+/*
+ * Copyright (C) 2018 Lightbend Inc. <https://www.lightbend.com>
+ */
+
 package akka.camel.internal
 
-import language.postfixOps
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.Matchers
 import scala.concurrent.duration._
-import org.scalatest.{ GivenWhenThen, BeforeAndAfterEach, BeforeAndAfterAll, WordSpec }
+import org.scalatest.{ GivenWhenThen, BeforeAndAfterEach, BeforeAndAfterAll, WordSpecLike }
 import akka.actor.{ Props, ActorSystem }
-import akka.camel._
 import akka.testkit.{ TimingTest, TestProbe, TestKit }
 import akka.camel.internal.ActivationProtocol._
 
-class ActivationTrackerTest extends TestKit(ActorSystem("test")) with WordSpec with MustMatchers with BeforeAndAfterAll with BeforeAndAfterEach with GivenWhenThen {
+class ActivationTrackerTest extends TestKit(ActorSystem("ActivationTrackerTest")) with WordSpecLike with Matchers with BeforeAndAfterAll with BeforeAndAfterEach with GivenWhenThen {
 
-  override protected def afterAll() { system.shutdown() }
+  override protected def afterAll(): Unit = { shutdown() }
 
   var actor: TestProbe = _
   var awaiting: Awaiting = _
   var anotherAwaiting: Awaiting = _
   val cause = new Exception("cause of failure")
 
-  override protected def beforeEach() {
+  override protected def beforeEach(): Unit = {
     actor = TestProbe()
     awaiting = new Awaiting(actor)
     anotherAwaiting = new Awaiting(actor)
@@ -27,7 +29,7 @@ class ActivationTrackerTest extends TestKit(ActorSystem("test")) with WordSpec w
   val at = system.actorOf(Props[ActivationTracker], name = "activationTrackker")
   "ActivationTracker" must {
     def publish(msg: Any) = at ! msg
-    implicit def timeout = remaining
+    implicit def timeout = remainingOrDefault
     "forwards activation message to all awaiting parties" taggedAs TimingTest in {
       awaiting.awaitActivation()
       anotherAwaiting.awaitActivation()

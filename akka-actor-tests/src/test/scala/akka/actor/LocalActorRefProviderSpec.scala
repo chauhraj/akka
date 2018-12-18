@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.actor
@@ -16,12 +16,13 @@ import scala.util.Failure
 object LocalActorRefProviderSpec {
   val config = """
     akka {
+      log-dead-letters = on
       actor {
+        debug.unhandled = on
         default-dispatcher {
           executor = "thread-pool-executor"
           thread-pool-executor {
-            core-pool-size-min = 16
-            core-pool-size-max = 16
+            fixed-pool-size = 16
           }
         }
       }
@@ -29,14 +30,13 @@ object LocalActorRefProviderSpec {
   """
 }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class LocalActorRefProviderSpec extends AkkaSpec(LocalActorRefProviderSpec.config) {
   "An LocalActorRefProvider" must {
 
     "find actor refs using actorFor" in {
       val a = system.actorOf(Props(new Actor { def receive = { case _ ⇒ } }))
       val b = system.actorFor(a.path)
-      a must be === b
+      a should ===(b)
     }
 
     "find child actor with URL encoded name using actorFor" in {
@@ -45,16 +45,56 @@ class LocalActorRefProviderSpec extends AkkaSpec(LocalActorRefProviderSpec.confi
         val child = context.actorOf(Props.empty, name = childName)
         def receive = {
           case "lookup" ⇒
-            if (childName == child.path.name) sender ! context.actorFor(childName)
-            else sender ! s"$childName is not ${child.path.name}!"
+            if (childName == child.path.name) sender() ! context.actorFor(childName)
+            else sender() ! s"$childName is not ${child.path.name}!"
         }
       }))
       a.tell("lookup", testActor)
       val b = expectMsgType[ActorRef]
-      b.isTerminated must be(false)
-      b.path.name must be(childName)
+      b.isTerminated should ===(false)
+      b.path.name should ===(childName)
     }
 
+  }
+
+  // #16757: messages sent to /user should be UnhandledMessages instead of DeadLetters
+  "The root guardian in a LocalActorRefProvider" must {
+    "not handle messages other than those it will act upon" in {
+
+      val message = "Hello, Mr. Root Guardian"
+      val rootGuardian = system.actorSelection("/")
+      val deadLettersPath = system.deadLetters.path
+
+      filterEvents(EventFilter.warning(s"unhandled message from Actor[$deadLettersPath]: $message", occurrences = 1)) {
+        rootGuardian ! message
+      }
+    }
+  }
+
+  "The user guardian in a LocalActorRefProvider" must {
+    "not handle messages other than those it will act upon" in {
+
+      val message = "Hello, Mr. User Guardian"
+      val userGuardian = system.actorSelection("/user")
+      val deadLettersPath = system.deadLetters.path
+
+      filterEvents(EventFilter.warning(s"unhandled message from Actor[$deadLettersPath]: $message", occurrences = 1)) {
+        userGuardian ! message
+      }
+    }
+  }
+
+  "The system guardian in a LocalActorRefProvider" must {
+    "not handle messages other than those it will act upon" in {
+
+      val message = "Hello, Mr. System Guardian"
+      val systemGuardian = system.actorSelection("/system")
+      val deadLettersPath = system.deadLetters.path
+
+      filterEvents(EventFilter.warning(s"unhandled message from Actor[$deadLettersPath]: $message", occurrences = 1)) {
+        systemGuardian ! message
+      }
+    }
   }
 
   "A LocalActorRef's ActorCell" must {
@@ -62,17 +102,21 @@ class LocalActorRefProviderSpec extends AkkaSpec(LocalActorRefProviderSpec.confi
       val GetChild = "GetChild"
       val a = watch(system.actorOf(Props(new Actor {
         val child = context.actorOf(Props.empty)
-        def receive = { case `GetChild` ⇒ sender ! child }
+        def receive = { case `GetChild` ⇒ sender() ! child }
       })))
       a.tell(GetChild, testActor)
       val child = expectMsgType[ActorRef]
       val childProps1 = child.asInstanceOf[LocalActorRef].underlying.props
-      childProps1 must be(Props.empty)
+      childProps1 should ===(Props.empty)
       system stop a
       expectTerminated(a)
-      val childProps2 = child.asInstanceOf[LocalActorRef].underlying.props
-      childProps2 must not be theSameInstanceAs(childProps1)
-      childProps2 must be theSameInstanceAs ActorCell.terminatedProps
+      // the fields are cleared after the Terminated message has been sent,
+      // so we need to check for a reasonable time after we receive it
+      awaitAssert({
+        val childProps2 = child.asInstanceOf[LocalActorRef].underlying.props
+        childProps2 should not be theSameInstanceAs(childProps1)
+        childProps2 should be theSameInstanceAs ActorCell.terminatedProps
+      }, 1 second)
     }
   }
 
@@ -82,7 +126,7 @@ class LocalActorRefProviderSpec extends AkkaSpec(LocalActorRefProviderSpec.confi
       val impl = system.asInstanceOf[ActorSystemImpl]
       val provider = impl.provider
 
-      provider.isInstanceOf[LocalActorRefProvider] must be(true)
+      provider.isInstanceOf[LocalActorRefProvider] should ===(true)
 
       for (i ← 0 until 100) {
         val address = "new-actor" + i
@@ -93,7 +137,7 @@ class LocalActorRefProviderSpec extends AkkaSpec(LocalActorRefProviderSpec.confi
           case Some(Failure(ex: InvalidActorNameException)) ⇒ 2
           case x ⇒ x
         })
-        set must be === Set(1, 2)
+        set should ===(Set[Any](1, 2))
       }
     }
 
@@ -110,14 +154,22 @@ class LocalActorRefProviderSpec extends AkkaSpec(LocalActorRefProviderSpec.confi
     }
 
     "throw suitable exceptions for malformed actor names" in {
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, null)).getMessage.contains("null") must be(true)
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, "")).getMessage.contains("empty") must be(true)
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, "$hallo")).getMessage.contains("conform") must be(true)
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, "a%")).getMessage.contains("conform") must be(true)
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%3")).getMessage.contains("conform") must be(true)
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%1t")).getMessage.contains("conform") must be(true)
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, "a?")).getMessage.contains("conform") must be(true)
-      intercept[InvalidActorNameException](system.actorOf(Props.empty, "üß")).getMessage.contains("conform") must be(true)
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, null)).getMessage should include("null")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "")).getMessage should include("empty")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "$hallo")).getMessage should include("not start with `$`")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "a%")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%3")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%xx")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%0G")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%gg")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "%1t")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "a?")).getMessage should include("Invalid actor path element")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, "üß")).getMessage should include("include only ASCII")
+
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, """he"llo""")).getMessage should include("""["] at position: 2""")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, """$hello""")).getMessage should include("""[$] at position: 0""")
+      intercept[InvalidActorNameException](system.actorOf(Props.empty, """hell>o""")).getMessage should include("""[>] at position: 4""")
     }
 
   }

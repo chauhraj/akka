@@ -1,16 +1,14 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
-import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import akka.actor.Address
-import scala.collection.immutable
 
-case class ClientDowningNodeThatIsUnreachableMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
+final case class ClientDowningNodeThatIsUnreachableMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
   val first = role("first")
   val second = role("second")
   val third = role("third")
@@ -45,7 +43,7 @@ abstract class ClientDowningNodeThatIsUnreachableSpec(multiNodeConfig: ClientDow
 
       runOn(first) {
         // kill 'third' node
-        testConductor.shutdown(third, 0).await
+        testConductor.exit(third, 0).await
         markNodeAsUnavailable(thirdAddress)
 
         // mark 'third' node as DOWN
@@ -53,7 +51,7 @@ abstract class ClientDowningNodeThatIsUnreachableSpec(multiNodeConfig: ClientDow
         enterBarrier("down-third-node")
 
         awaitMembersUp(numberOfMembers = 3, canNotBePartOfMemberRing = Set(thirdAddress))
-        clusterView.members.exists(_.address == thirdAddress) must be(false)
+        clusterView.members.exists(_.address == thirdAddress) should ===(false)
       }
 
       runOn(third) {

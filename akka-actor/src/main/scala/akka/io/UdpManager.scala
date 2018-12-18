@@ -1,10 +1,10 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.io
 
 import akka.actor.Props
-import akka.io.IO.SelectorBasedManager
 import akka.io.Udp._
 
 /**
@@ -38,21 +38,22 @@ import akka.io.Udp._
  * == Simple send ==
  *
  * Udp provides a simple method of sending UDP datagrams if no reply is expected. To acquire the Sender actor
- * a SimpleSend message has to be sent to the manager. The sender of the command will be notified by a SimpleSendReady
+ * a SimpleSend message has to be sent to the manager. The sender of the command will be notified by a SimpleSenderReady
  * message that the service is available. UDP datagrams can be sent by sending [[akka.io.Udp.Send]] messages to the
- * sender of SimpleSendReady. All the datagrams will contain an ephemeral local port as sender and answers will be
+ * sender of SimpleSenderReady. All the datagrams will contain an ephemeral local port as sender and answers will be
  * discarded.
  *
  */
-private[io] class UdpManager(udp: UdpExt) extends SelectorBasedManager(udp.settings, udp.settings.NrOfSelectors) {
+private[io] class UdpManager(udp: UdpExt) extends SelectionHandler.SelectorBasedManager(udp.settings, udp.settings.NrOfSelectors) {
 
   def receive = workerForCommandHandler {
     case b: Bind ⇒
-      val commander = sender
-      Props(new UdpListener(udp, commander, b))
+      val commander = sender() // cache because we create a function that will run asynchly
+      (registry ⇒ Props(classOf[UdpListener], udp, registry, commander, b))
+
     case SimpleSender(options) ⇒
-      val commander = sender
-      Props(new UdpSender(udp, options, commander))
+      val commander = sender() // cache because we create a function that will run asynchly
+      (registry ⇒ Props(classOf[UdpSender], udp, registry, commander, options))
   }
 
 }

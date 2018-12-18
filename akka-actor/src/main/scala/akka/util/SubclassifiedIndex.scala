@@ -1,6 +1,7 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.util
 
 import scala.collection.immutable
@@ -72,7 +73,7 @@ private[akka] object SubclassifiedIndex {
  * cache, e.g. HashMap, is faster than tree traversal which must use linear
  * scan at each level. Therefore, no value traversals are published.
  */
-private[akka] class SubclassifiedIndex[K, V] private (private var values: Set[V])(implicit sc: Subclassification[K]) {
+private[akka] class SubclassifiedIndex[K, V] private (protected var values: Set[V])(implicit sc: Subclassification[K]) {
 
   import SubclassifiedIndex._
 
@@ -127,7 +128,7 @@ private[akka] class SubclassifiedIndex[K, V] private (private var values: Set[V]
     if (!found) {
       val v = values + value
       val n = new Nonroot(root, key, v)
-      integrate(n) ++ n.innerAddValue(key, value) :+ (key -> v)
+      integrate(n) ++ n.innerAddValue(key, value) :+ (key → v)
     } else ch
   }
 

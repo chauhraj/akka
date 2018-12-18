@@ -1,18 +1,18 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.cluster
 
 import java.util.concurrent.atomic.AtomicReference
-import akka.remote.testkit.MultiNodeConfig
 import akka.remote.FailureDetector
 import com.typesafe.config.Config
+import akka.event.EventStream
 
 /**
  * User controllable "puppet" failure detector.
  */
-class FailureDetectorPuppet(config: Config) extends FailureDetector {
+class FailureDetectorPuppet(config: Config, ev: EventStream) extends FailureDetector {
 
   trait Status
   object Up extends Status

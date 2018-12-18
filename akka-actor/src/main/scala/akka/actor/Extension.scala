@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor
 
 import scala.reflect.ClassTag
@@ -18,8 +19,49 @@ import scala.reflect.ClassTag
  * The extension itself can be created in any way desired and has full access
  * to the ActorSystem implementation.
  *
- * This trait is only a marker interface to signify an Akka Extension, see
- * [[akka.actor.ExtensionKey]] for a concise way of formulating extensions.
+ * This trait is only a marker interface to signify an Akka Extension. This is
+ * how an extension is normally constructed.
+ *
+ * Scala API:
+ *
+ * {{{
+ * object MyExt extends ExtensionId[Ext] with ExtensionIdProvider {
+ *
+ *   override def lookup = MyExt
+ *
+ *   override def createExtension(system: ExtendedActorSystem): Ext = new Ext(system)
+ *
+ *   // Java API: retrieve the extension for the given system.
+ *   override def get(system: ActorSystem): UdpExt = super.get(system)
+ * }
+ *
+ * class Ext(system: ExtendedActorSystem) extends Extension {
+ *   ...
+ * }
+ * }}}
+ *
+ * Java API:
+ *
+ * {{{
+ * public class MyExt extends AbstractExtensionId<MyExtImpl>
+ *   implements ExtensionIdProvider {
+ *   public final static MyExt MyExtProvider = new MyExt();
+ *
+ *   private MyExt() {}
+ *
+ *   public MyExt lookup() {
+ *     return MyExt.MyExtProvider;
+ *   }
+ *
+ *   public MyExtImpl createExtension(ExtendedActorSystem system) {
+ *     return new MyExtImpl();
+ *   }
+ * }
+ *
+ * public class MyExtImpl implements Extension {
+ *    ...
+ * }
+ * }}}
  */
 trait Extension
 
@@ -33,12 +75,14 @@ trait ExtensionId[T <: Extension] {
   /**
    * Returns an instance of the extension identified by this ExtensionId instance.
    */
-  def apply(system: ActorSystem): T = system.registerExtension(this)
+  def apply(system: ActorSystem): T = {
+    java.util.Objects.requireNonNull(system, "system must not be null!").registerExtension(this)
+  }
 
   /**
    * Returns an instance of the extension identified by this ExtensionId instance.
    * Java API
-   * For extensions written in Scala that are to be used used from Java also,
+   * For extensions written in Scala that are to be used from Java also,
    * this method should be overridden to get correct return type.
    * {{{
    * override def get(system: ActorSystem): TheExtension = super.get(system)
@@ -90,17 +134,23 @@ trait ExtensionIdProvider {
  *
  * {{{
  * public class MyExt extends Extension {
- *   static final ExtensionKey<MyExt> key = new ExtensionKey<MyExt>(MyExt.class);
+ *   public static final ExtensionKey<MyExt> key = new ExtensionKey<MyExt>(MyExt.class);
  *
  *   public MyExt(ExtendedActorSystem system) {
  *     ...
  *   }
  * }
  * }}}
+ *
+ * Note: Don't use this class if the extension is written in Scala and consumed in
+ * Eclipse Java projects. JDT has problems resolving correct type for the
+ * `get` method.
+ *
  */
+@deprecated(message = "Use a regular Extension instead", since = "2.5.0")
 abstract class ExtensionKey[T <: Extension](implicit m: ClassTag[T]) extends ExtensionId[T] with ExtensionIdProvider {
   def this(clazz: Class[T]) = this()(ClassTag(clazz))
 
   override def lookup(): ExtensionId[T] = this
-  def createExtension(system: ExtendedActorSystem): T = system.dynamicAccess.createInstanceFor[T](m.runtimeClass, List(classOf[ExtendedActorSystem] -> system)).get
+  def createExtension(system: ExtendedActorSystem): T = system.dynamicAccess.createInstanceFor[T](m.runtimeClass, List(classOf[ExtendedActorSystem] → system)).get
 }

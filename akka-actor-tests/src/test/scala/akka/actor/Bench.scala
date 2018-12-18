@@ -3,14 +3,15 @@
    contributed by Julien Gaugaz
    inspired by the version contributed by Yura Taras and modified by Isaac Gouy
 */
+
 package akka.actor
 
 object Chameneos {
 
   sealed trait ChameneosEvent
-  case class Meet(from: ActorRef, colour: Colour) extends ChameneosEvent
-  case class Change(colour: Colour) extends ChameneosEvent
-  case class MeetingCount(count: Int) extends ChameneosEvent
+  final case class Meet(from: ActorRef, colour: Colour) extends ChameneosEvent
+  final case class Change(colour: Colour) extends ChameneosEvent
+  final case class MeetingCount(count: Int) extends ChameneosEvent
   case object Exit extends ChameneosEvent
 
   abstract class Colour
@@ -42,7 +43,7 @@ object Chameneos {
 
       case Exit ⇒
         colour = FADED
-        sender ! MeetingCount(meetings)
+        sender() ! MeetingCount(meetings)
     }
 
     def complement(otherColour: Colour): Colour = colour match {
@@ -95,11 +96,11 @@ object Chameneos {
               n -= 1
               chameneo ! msg
               waitingChameneo = None
-            case None ⇒ waitingChameneo = Some(sender)
+            case None ⇒ waitingChameneo = Some(sender())
           }
         } else {
           waitingChameneo.foreach(_ ! Exit)
-          sender ! Exit
+          sender() ! Exit
         }
     }
   }
@@ -111,7 +112,7 @@ object Chameneos {
     val actor = system.actorOf(Props(new Mall(1000000, 4)))
     Thread.sleep(10000)
     println("Elapsed: " + (end - start))
-    system.shutdown()
+    system.terminate()
   }
 
   def main(args: Array[String]): Unit = run()

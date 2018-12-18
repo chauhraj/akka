@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.dispatch
@@ -8,14 +8,10 @@ import akka.event.Logging.Error
 import akka.actor.ActorCell
 import akka.event.Logging
 import akka.dispatch.sysmsg.SystemMessage
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.{ ExecutorService, RejectedExecutionException }
-import scala.concurrent.forkjoin.ForkJoinPool
 import scala.concurrent.duration.Duration
-import scala.concurrent.Awaitable
 import scala.concurrent.duration.FiniteDuration
-import scala.annotation.tailrec
-import java.lang.reflect.ParameterizedType
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater
 
 /**
  * The event-based ``Dispatcher`` binds a set of Actors to a thread pool backed up by a
@@ -30,15 +26,15 @@ import java.lang.reflect.ParameterizedType
  *                   Larger values (or zero or negative) increase throughput, smaller values increase fairness
  */
 class Dispatcher(
-  _prerequisites: DispatcherPrerequisites,
-  val id: String,
-  val throughput: Int,
-  val throughputDeadlineTime: Duration,
-  val mailboxType: MailboxType,
-  val mailboxTypeConfigured: Boolean,
+  _configurator:                  MessageDispatcherConfigurator,
+  val id:                         String,
+  val throughput:                 Int,
+  val throughputDeadlineTime:     Duration,
   executorServiceFactoryProvider: ExecutorServiceFactoryProvider,
-  val shutdownTimeout: FiniteDuration)
-  extends MessageDispatcher(_prerequisites) {
+  val shutdownTimeout:            FiniteDuration)
+  extends MessageDispatcher(_configurator) {
+
+  import configurator.prerequisites._
 
   private class LazyExecutorServiceDelegate(factory: ExecutorServiceFactory) extends ExecutorServiceDelegate {
     lazy val executor: ExecutorService = factory.createExecutorService
@@ -46,7 +42,7 @@ class Dispatcher(
   }
 
   @volatile private var executorServiceDelegate: LazyExecutorServiceDelegate =
-    new LazyExecutorServiceDelegate(executorServiceFactoryProvider.createExecutorServiceFactory(id, prerequisites.threadFactory))
+    new LazyExecutorServiceDelegate(executorServiceFactoryProvider.createExecutorServiceFactory(id, threadFactory))
 
   protected final def executorService: ExecutorServiceDelegate = executorServiceDelegate
 
@@ -71,7 +67,7 @@ class Dispatcher(
   /**
    * INTERNAL API
    */
-  protected[akka] def executeTask(invocation: TaskInvocation) {
+  protected[akka] def executeTask(invocation: TaskInvocation): Unit = {
     try {
       executorService execute invocation
     } catch {
@@ -80,7 +76,7 @@ class Dispatcher(
           executorService execute invocation
         } catch {
           case e2: RejectedExecutionException ⇒
-            prerequisites.eventStream.publish(Error(e, getClass.getName, getClass, "executeTask was rejected twice!"))
+            eventStream.publish(Error(e, getClass.getName, getClass, "executeTask was rejected twice!"))
             throw e2
         }
     }
@@ -89,20 +85,21 @@ class Dispatcher(
   /**
    * INTERNAL API
    */
-  protected[akka] def createMailbox(actor: akka.actor.Cell): Mailbox = {
-    new Mailbox(getMailboxType(actor, mailboxType, mailboxTypeConfigured).create(Some(actor.self), Some(actor.system))) with DefaultSystemMessageQueue
+  protected[akka] def createMailbox(actor: akka.actor.Cell, mailboxType: MailboxType): Mailbox = {
+    new Mailbox(mailboxType.create(Some(actor.self), Some(actor.system))) with DefaultSystemMessageQueue
   }
+
+  private val esUpdater = AtomicReferenceFieldUpdater.newUpdater(
+    classOf[Dispatcher],
+    classOf[LazyExecutorServiceDelegate],
+    "executorServiceDelegate")
 
   /**
    * INTERNAL API
    */
   protected[akka] def shutdown: Unit = {
     val newDelegate = executorServiceDelegate.copy() // Doesn't matter which one we copy
-    val es = synchronized {
-      val service = executorServiceDelegate
-      executorServiceDelegate = newDelegate // just a quick getAndSet
-      service
-    }
+    val es = esUpdater.getAndSet(this, newDelegate)
     es.shutdown()
   }
 
@@ -118,14 +115,14 @@ class Dispatcher(
           executorService execute mbox
           true
         } catch {
-          case e: RejectedExecutionException ⇒
+          case _: RejectedExecutionException ⇒
             try {
               executorService execute mbox
               true
             } catch { //Retry once
               case e: RejectedExecutionException ⇒
                 mbox.setAsIdle()
-                prerequisites.eventStream.publish(Error(e, getClass.getName, getClass, "registerForExecution was rejected twice!"))
+                eventStream.publish(Error(e, getClass.getName, getClass, "registerForExecution was rejected twice!"))
                 throw e
             }
         }

@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote.testconductor
 
 import language.implicitConversions
@@ -9,17 +10,16 @@ import org.jboss.netty.handler.codec.oneone.OneToOneEncoder
 import org.jboss.netty.channel.ChannelHandlerContext
 import org.jboss.netty.channel.Channel
 import akka.remote.testconductor.{ TestConductorProtocol ⇒ TCP }
-import com.google.protobuf.Message
 import akka.actor.Address
 import org.jboss.netty.handler.codec.oneone.OneToOneDecoder
 import scala.concurrent.duration._
 import akka.remote.testconductor.TestConductorProtocol.BarrierOp
 import akka.remote.transport.ThrottlerTransportAdapter.Direction
 
-case class RoleName(name: String)
+final case class RoleName(name: String)
 
-private[akka] case class ToClient(msg: ClientOp with NetworkOp)
-private[akka] case class ToServer(msg: ServerOp with NetworkOp)
+private[akka] final case class ToClient(msg: ClientOp with NetworkOp)
+private[akka] final case class ToServer(msg: ServerOp with NetworkOp)
 
 private[akka] sealed trait ClientOp // messages sent to from Conductor to Player
 private[akka] sealed trait ServerOp // messages sent to from Player to Conductor
@@ -31,30 +31,30 @@ private[akka] sealed trait ConfirmedClientOp extends ClientOp
 /**
  * First message of connection sets names straight.
  */
-private[akka] case class Hello(name: String, addr: Address) extends NetworkOp
+private[akka] final case class Hello(name: String, addr: Address) extends NetworkOp
 
-private[akka] case class EnterBarrier(name: String, timeout: Option[FiniteDuration]) extends ServerOp with NetworkOp
-private[akka] case class FailBarrier(name: String) extends ServerOp with NetworkOp
-private[akka] case class BarrierResult(name: String, success: Boolean) extends UnconfirmedClientOp with NetworkOp
+private[akka] final case class EnterBarrier(name: String, timeout: Option[FiniteDuration]) extends ServerOp with NetworkOp
+private[akka] final case class FailBarrier(name: String) extends ServerOp with NetworkOp
+private[akka] final case class BarrierResult(name: String, success: Boolean) extends UnconfirmedClientOp with NetworkOp
 
-private[akka] case class Throttle(node: RoleName, target: RoleName, direction: Direction, rateMBit: Float) extends CommandOp
-private[akka] case class ThrottleMsg(target: Address, direction: Direction, rateMBit: Float) extends ConfirmedClientOp with NetworkOp
+private[akka] final case class Throttle(node: RoleName, target: RoleName, direction: Direction, rateMBit: Float) extends CommandOp
+private[akka] final case class ThrottleMsg(target: Address, direction: Direction, rateMBit: Float) extends ConfirmedClientOp with NetworkOp
 
-private[akka] case class Disconnect(node: RoleName, target: RoleName, abort: Boolean) extends CommandOp
-private[akka] case class DisconnectMsg(target: Address, abort: Boolean) extends ConfirmedClientOp with NetworkOp
+private[akka] final case class Disconnect(node: RoleName, target: RoleName, abort: Boolean) extends CommandOp
+private[akka] final case class DisconnectMsg(target: Address, abort: Boolean) extends ConfirmedClientOp with NetworkOp
 
-private[akka] case class Terminate(node: RoleName, exitValue: Int) extends CommandOp
-private[akka] case class TerminateMsg(exitValue: Int) extends ConfirmedClientOp with NetworkOp
+private[akka] final case class Terminate(node: RoleName, shutdownOrExit: Either[Boolean, Int]) extends CommandOp
+private[akka] final case class TerminateMsg(shutdownOrExit: Either[Boolean, Int]) extends ConfirmedClientOp with NetworkOp
 
-private[akka] case class GetAddress(node: RoleName) extends ServerOp with NetworkOp
-private[akka] case class AddressReply(node: RoleName, addr: Address) extends UnconfirmedClientOp with NetworkOp
+private[akka] final case class GetAddress(node: RoleName) extends ServerOp with NetworkOp
+private[akka] final case class AddressReply(node: RoleName, addr: Address) extends UnconfirmedClientOp with NetworkOp
 
 private[akka] abstract class Done extends ServerOp with UnconfirmedClientOp with NetworkOp
 private[akka] case object Done extends Done {
   def getInstance: Done = this
 }
 
-private[akka] case class Remove(node: RoleName) extends CommandOp
+private[akka] final case class Remove(node: RoleName) extends CommandOp
 
 private[akka] class MsgEncoder extends OneToOneEncoder {
 
@@ -76,8 +76,8 @@ private[akka] class MsgEncoder extends OneToOneEncoder {
     case x: NetworkOp ⇒
       val w = TCP.Wrapper.newBuilder
       x match {
-        case Hello(name, addr) ⇒
-          w.setHello(TCP.Hello.newBuilder.setName(name).setAddress(addr))
+        case Hello(name, address) ⇒
+          w.setHello(TCP.Hello.newBuilder.setName(name).setAddress(address))
         case EnterBarrier(name, timeout) ⇒
           val barrier = TCP.EnterBarrier.newBuilder.setName(name)
           timeout foreach (t ⇒ barrier.setTimeout(t.toNanos))
@@ -94,12 +94,16 @@ private[akka] class MsgEncoder extends OneToOneEncoder {
         case DisconnectMsg(target, abort) ⇒
           w.setFailure(TCP.InjectFailure.newBuilder.setAddress(target)
             .setFailure(if (abort) TCP.FailType.Abort else TCP.FailType.Disconnect))
-        case TerminateMsg(exitValue) ⇒
-          w.setFailure(TCP.InjectFailure.newBuilder.setFailure(TCP.FailType.Shutdown).setExitValue(exitValue))
+        case TerminateMsg(Right(exitValue)) ⇒
+          w.setFailure(TCP.InjectFailure.newBuilder.setFailure(TCP.FailType.Exit).setExitValue(exitValue))
+        case TerminateMsg(Left(false)) ⇒
+          w.setFailure(TCP.InjectFailure.newBuilder.setFailure(TCP.FailType.Shutdown))
+        case TerminateMsg(Left(true)) ⇒
+          w.setFailure(TCP.InjectFailure.newBuilder.setFailure(TCP.FailType.ShutdownAbrupt))
         case GetAddress(node) ⇒
           w.setAddr(TCP.AddressRequest.newBuilder.setNode(node.name))
-        case AddressReply(node, addr) ⇒
-          w.setAddr(TCP.AddressRequest.newBuilder.setNode(node.name).setAddr(addr))
+        case AddressReply(node, address) ⇒
+          w.setAddr(TCP.AddressRequest.newBuilder.setNode(node.name).setAddr(address))
         case _: Done ⇒
           w.setDone("")
       }
@@ -130,17 +134,20 @@ private[akka] class MsgDecoder extends OneToOneDecoder {
           case BarrierOp.Succeeded ⇒ BarrierResult(barrier.getName, true)
           case BarrierOp.Failed    ⇒ BarrierResult(barrier.getName, false)
           case BarrierOp.Fail      ⇒ FailBarrier(barrier.getName)
-          case BarrierOp.Enter ⇒ EnterBarrier(barrier.getName,
+          case BarrierOp.Enter ⇒ EnterBarrier(
+            barrier.getName,
             if (barrier.hasTimeout) Option(Duration.fromNanos(barrier.getTimeout)) else None)
         }
       } else if (w.hasFailure) {
         val f = w.getFailure
         import TCP.{ FailType ⇒ FT }
         f.getFailure match {
-          case FT.Throttle   ⇒ ThrottleMsg(f.getAddress, f.getDirection, f.getRateMBit)
-          case FT.Abort      ⇒ DisconnectMsg(f.getAddress, true)
-          case FT.Disconnect ⇒ DisconnectMsg(f.getAddress, false)
-          case FT.Shutdown   ⇒ TerminateMsg(f.getExitValue)
+          case FT.Throttle       ⇒ ThrottleMsg(f.getAddress, f.getDirection, f.getRateMBit)
+          case FT.Abort          ⇒ DisconnectMsg(f.getAddress, true)
+          case FT.Disconnect     ⇒ DisconnectMsg(f.getAddress, false)
+          case FT.Exit           ⇒ TerminateMsg(Right(f.getExitValue))
+          case FT.Shutdown       ⇒ TerminateMsg(Left(false))
+          case FT.ShutdownAbrupt ⇒ TerminateMsg(Left(true))
         }
       } else if (w.hasAddr) {
         val a = w.getAddr

@@ -1,15 +1,13 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import scala.collection.immutable
-import com.typesafe.config.ConfigFactory
-import org.scalatest.BeforeAndAfter
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import scala.concurrent.duration._
 import akka.actor.Address
 
 object JoinSeedNodeMultiJvmSpec extends MultiNodeConfig {
@@ -20,7 +18,6 @@ object JoinSeedNodeMultiJvmSpec extends MultiNodeConfig {
   val ordinary2 = role("ordinary2")
 
   commonConfig(debugConfig(on = false).
-    withFallback(ConfigFactory.parseString("akka.cluster.auto-join = off")).
     withFallback(MultiNodeClusterSpec.clusterConfig))
 }
 
@@ -48,6 +45,10 @@ abstract class JoinSeedNodeSpec
 
       runOn(seed1, seed2, seed3) {
         cluster.joinSeedNodes(seedNodes)
+        runOn(seed3) {
+          // it is allowed to call this several times (verifies ticket #3973)
+          cluster.joinSeedNodes(seedNodes)
+        }
         awaitMembersUp(3)
       }
       enterBarrier("after-1")

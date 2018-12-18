@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.camel
@@ -15,13 +15,13 @@ import scala.reflect.ClassTag
 import akka.actor.{ ActorRef, Props, ActorSystem, Actor }
 import scala.concurrent.Await
 import akka.util.Timeout
-import akka.testkit.AkkaSpec
+import akka.testkit.{ TestKit, AkkaSpec }
 
 private[camel] object TestSupport {
   def start(actor: ⇒ Actor, name: String)(implicit system: ActorSystem, timeout: Timeout): ActorRef =
     Await.result(CamelExtension(system).activationFutureFor(system.actorOf(Props(actor), name))(timeout, system.dispatcher), timeout.duration)
 
-  def stop(actorRef: ActorRef)(implicit system: ActorSystem, timeout: Timeout) {
+  def stop(actorRef: ActorRef)(implicit system: ActorSystem, timeout: Timeout): Unit = {
     system.stop(actorRef)
     Await.result(CamelExtension(system).deactivationFutureFor(actorRef)(timeout, system.dispatcher), timeout.duration)
   }
@@ -48,12 +48,12 @@ private[camel] object TestSupport {
   }
 
   trait SharedCamelSystem extends BeforeAndAfterAll { this: Suite ⇒
-    implicit lazy val system = ActorSystem("test", AkkaSpec.testConf)
+    implicit lazy val system = ActorSystem("SharedCamelSystem", AkkaSpec.testConf)
     implicit lazy val camel = CamelExtension(system)
 
-    abstract override protected def afterAll() {
+    abstract override protected def afterAll(): Unit = {
       super.afterAll()
-      system.shutdown()
+      TestKit.shutdownActorSystem(system)
     }
   }
 
@@ -61,14 +61,14 @@ private[camel] object TestSupport {
     implicit var system: ActorSystem = _
     implicit var camel: Camel = _
 
-    override protected def beforeEach() {
+    override protected def beforeEach(): Unit = {
       super.beforeEach()
-      system = ActorSystem("test", AkkaSpec.testConf)
+      system = ActorSystem("NonSharedCamelSystem", AkkaSpec.testConf)
       camel = CamelExtension(system)
     }
 
-    override protected def afterEach() {
-      system.shutdown()
+    override protected def afterEach(): Unit = {
+      TestKit.shutdownActorSystem(system)
       super.afterEach()
     }
 

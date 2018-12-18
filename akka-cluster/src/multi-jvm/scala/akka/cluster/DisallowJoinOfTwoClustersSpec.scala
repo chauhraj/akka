@@ -1,10 +1,9 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.cluster
 
-import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
@@ -67,7 +66,7 @@ abstract class DisallowJoinOfTwoClustersSpec
 
       // no change expected
       1 to 5 foreach { _ ⇒
-        clusterView.members.size must be(expectedSize)
+        clusterView.members.size should ===(expectedSize)
         Thread.sleep(1000)
       }
 

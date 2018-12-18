@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.camel
@@ -10,28 +10,26 @@ import org.apache.camel.{ Exchange, Processor }
 import org.apache.camel.builder.RouteBuilder
 import org.apache.camel.component.mock.MockEndpoint
 import scala.concurrent.Await
-import akka.camel.TestSupport.SharedCamelSystem
 import akka.actor.SupervisorStrategy.Stop
-import org.scalatest.{ BeforeAndAfterEach, BeforeAndAfterAll, WordSpec }
+import org.scalatest.{ BeforeAndAfterEach, BeforeAndAfterAll, WordSpecLike }
 import akka.actor._
-import akka.pattern._
 import scala.concurrent.duration._
 import akka.util.Timeout
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.Matchers
 import akka.testkit._
 import akka.actor.Status.Failure
 
 /**
  * Tests the features of the Camel Producer.
  */
-class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)) with WordSpec with BeforeAndAfterAll with BeforeAndAfterEach with MustMatchers {
+class ProducerFeatureTest extends TestKit(ActorSystem("ProducerFeatureTest", AkkaSpec.testConf)) with WordSpecLike with BeforeAndAfterAll with BeforeAndAfterEach with Matchers {
 
   import ProducerFeatureTest._
   implicit def camel = CamelExtension(system)
 
-  override protected def afterAll() {
+  override protected def afterAll(): Unit = {
     super.afterAll()
-    system.shutdown()
+    shutdown()
   }
 
   val camelContext = camel.context
@@ -39,17 +37,17 @@ class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)
   camelContext.setUseBreadcrumb(false)
   val timeoutDuration = 1 second
   implicit val timeout = Timeout(timeoutDuration)
-  override protected def beforeAll { camelContext.addRoutes(new TestRoute(system)) }
+  override protected def beforeAll: Unit = { camelContext.addRoutes(new TestRoute(system)) }
 
-  override protected def afterEach { mockEndpoint.reset() }
+  override protected def afterEach: Unit = { mockEndpoint.reset() }
 
   "A Producer on a sync Camel route" must {
 
     "01 produce a message and receive normal response" in {
       val producer = system.actorOf(Props(new TestProducer("direct:producer-test-2", true)), name = "01-direct-producer-2")
-      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId → "123"))
       producer.tell(message, testActor)
-      expectMsg(CamelMessage("received TEST", Map(CamelMessage.MessageExchangeId -> "123")))
+      expectMsg(CamelMessage("received TEST", Map(CamelMessage.MessageExchangeId → "123")))
     }
 
     "02 produce a message and receive failure response" in {
@@ -60,7 +58,7 @@ class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)
           case p: Props ⇒ {
             val producer = context.actorOf(p)
             context.watch(producer)
-            sender ! producer
+            sender() ! producer
           }
           case Terminated(actorRef) ⇒ {
             deadActor = Some(actorRef)
@@ -74,17 +72,17 @@ class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)
 
       supervisor.tell(Props(new TestProducer("direct:producer-test-2")), testActor)
       val producer = receiveOne(timeoutDuration).asInstanceOf[ActorRef]
-      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId → "123"))
       filterEvents(EventFilter[AkkaCamelException](occurrences = 1)) {
         producer.tell(message, testActor)
         expectMsgPF(timeoutDuration) {
           case Failure(e: AkkaCamelException) ⇒
-            e.getMessage must be("failure")
-            e.headers must be(Map(CamelMessage.MessageExchangeId -> "123"))
+            e.getMessage should ===("failure")
+            e.headers should ===(Map(CamelMessage.MessageExchangeId → "123"))
         }
       }
       Await.ready(latch, timeoutDuration)
-      deadActor must be(Some(producer))
+      deadActor should ===(Some(producer))
     }
 
     "03 produce a message oneway" in {
@@ -108,21 +106,21 @@ class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)
 
     "10 produce message to direct:producer-test-3 and receive normal response" in {
       val producer = system.actorOf(Props(new TestProducer("direct:producer-test-3")), name = "10-direct-producer-test-3")
-      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId → "123"))
       producer.tell(message, testActor)
-      expectMsg(CamelMessage("received test", Map(CamelMessage.MessageExchangeId -> "123")))
+      expectMsg(CamelMessage("received test", Map(CamelMessage.MessageExchangeId → "123")))
     }
 
     "11 produce message to direct:producer-test-3 and receive failure response" in {
       val producer = system.actorOf(Props(new TestProducer("direct:producer-test-3")), name = "11-direct-producer-test-3-receive-failure")
-      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId → "123"))
 
       filterEvents(EventFilter[AkkaCamelException](occurrences = 1)) {
         producer.tell(message, testActor)
         expectMsgPF(timeoutDuration) {
           case Failure(e: AkkaCamelException) ⇒
-            e.getMessage must be("failure")
-            e.headers must be(Map(CamelMessage.MessageExchangeId -> "123"))
+            e.getMessage should ===("failure")
+            e.headers should ===(Map(CamelMessage.MessageExchangeId → "123"))
         }
       }
     }
@@ -130,22 +128,22 @@ class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)
     "12 produce message, forward normal response of direct:producer-test-2 to a replying target actor and receive response" in {
       val target = system.actorOf(Props[ReplyingForwardTarget], name = "12-reply-forwarding-target")
       val producer = system.actorOf(Props(new TestForwarder("direct:producer-test-2", target)), name = "12-direct-producer-test-2-forwarder")
-      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId → "123"))
       producer.tell(message, testActor)
-      expectMsg(CamelMessage("received test", Map(CamelMessage.MessageExchangeId -> "123", "test" -> "result")))
+      expectMsg(CamelMessage("received test", Map(CamelMessage.MessageExchangeId → "123", "test" → "result")))
     }
 
     "13 produce message, forward failure response of direct:producer-test-2 to a replying target actor and receive response" in {
       val target = system.actorOf(Props[ReplyingForwardTarget], name = "13-reply-forwarding-target")
       val producer = system.actorOf(Props(new TestForwarder("direct:producer-test-2", target)), name = "13-direct-producer-test-2-forwarder-failure")
-      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId → "123"))
 
       filterEvents(EventFilter[AkkaCamelException](occurrences = 1)) {
         producer.tell(message, testActor)
         expectMsgPF(timeoutDuration) {
           case Failure(e: AkkaCamelException) ⇒
-            e.getMessage must be("failure")
-            e.headers must be(Map(CamelMessage.MessageExchangeId -> "123", "test" -> "failure"))
+            e.getMessage should ===("failure")
+            e.headers should ===(Map(CamelMessage.MessageExchangeId → "123", "test" → "failure"))
         }
       }
     }
@@ -172,23 +170,23 @@ class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)
     "16 produce message, forward normal response from direct:producer-test-3 to a replying target actor and receive response" in {
       val target = system.actorOf(Props[ReplyingForwardTarget], name = "16-reply-forwarding-target")
       val producer = system.actorOf(Props(new TestForwarder("direct:producer-test-3", target)), name = "16-direct-producer-test-3-to-replying-actor")
-      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("test", Map(CamelMessage.MessageExchangeId → "123"))
 
       producer.tell(message, testActor)
-      expectMsg(CamelMessage("received test", Map(CamelMessage.MessageExchangeId -> "123", "test" -> "result")))
+      expectMsg(CamelMessage("received test", Map(CamelMessage.MessageExchangeId → "123", "test" → "result")))
     }
 
     "17 produce message, forward failure response from direct:producer-test-3 to a replying target actor and receive response" in {
       val target = system.actorOf(Props[ReplyingForwardTarget], name = "17-reply-forwarding-target")
       val producer = system.actorOf(Props(new TestForwarder("direct:producer-test-3", target)), name = "17-direct-producer-test-3-forward-failure")
 
-      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId -> "123"))
+      val message = CamelMessage("fail", Map(CamelMessage.MessageExchangeId → "123"))
       filterEvents(EventFilter[AkkaCamelException](occurrences = 1)) {
         producer.tell(message, testActor)
         expectMsgPF(timeoutDuration) {
           case Failure(e: AkkaCamelException) ⇒
-            e.getMessage must be("failure")
-            e.headers must be(Map(CamelMessage.MessageExchangeId -> "123", "test" -> "failure"))
+            e.getMessage should ===("failure")
+            e.headers should ===(Map(CamelMessage.MessageExchangeId → "123", "test" → "failure"))
         }
       }
     }
@@ -220,7 +218,7 @@ class ProducerFeatureTest extends TestKit(ActorSystem("test", AkkaSpec.testConf)
         val futureFailed = producer.tell("fail", testActor)
         expectMsgPF(timeoutDuration) {
           case Failure(e) ⇒
-            e.getMessage must be("fail")
+            e.getMessage should ===("fail")
         }
         producer.tell("OK", testActor)
         expectMsg("OK")
@@ -275,13 +273,13 @@ object ProducerFeatureTest {
         body: String ⇒
           if (body == "err") throw new Exception("Crash!")
           val upperMsg = body.toUpperCase
-          lastSender = Some(sender)
+          lastSender = Some(sender())
           lastMessage = Some(upperMsg)
       }
       else msg
     }
 
-    override def postStop() {
+    override def postStop(): Unit = {
       for (msg ← lastMessage; aref ← lastSender) context.parent ! ((aref, msg))
       super.postStop()
     }
@@ -290,7 +288,7 @@ object ProducerFeatureTest {
   class TestProducer(uri: String, upper: Boolean = false) extends Actor with Producer {
     def endpointUri = uri
 
-    override def preRestart(reason: Throwable, message: Option[Any]) {
+    override def preRestart(reason: Throwable, message: Option[Any]): Unit = {
       //overriding on purpose so it doesn't try to deRegister and reRegister at restart,
       // which would cause a deadletter message in the test output.
     }
@@ -314,9 +312,9 @@ object ProducerFeatureTest {
   class TestResponder extends Actor {
     def receive = {
       case msg: CamelMessage ⇒ msg.body match {
-        case "fail" ⇒ context.sender ! akka.actor.Status.Failure(new AkkaCamelException(new Exception("failure"), msg.headers))
+        case "fail" ⇒ context.sender() ! akka.actor.Status.Failure(new AkkaCamelException(new Exception("failure"), msg.headers))
         case _ ⇒
-          context.sender ! (msg.mapBody {
+          context.sender() ! (msg.mapBody {
             body: String ⇒ "received %s" format body
           })
       }
@@ -326,10 +324,10 @@ object ProducerFeatureTest {
   class ReplyingForwardTarget extends Actor {
     def receive = {
       case msg: CamelMessage ⇒
-        context.sender ! (msg.copy(headers = msg.headers + ("test" -> "result")))
+        context.sender() ! (msg.copy(headers = msg.headers + ("test" → "result")))
       case msg: akka.actor.Status.Failure ⇒
         msg.cause match {
-          case e: AkkaCamelException ⇒ context.sender ! Status.Failure(new AkkaCamelException(e, e.headers + ("test" -> "failure")))
+          case e: AkkaCamelException ⇒ context.sender() ! Status.Failure(new AkkaCamelException(e, e.headers + ("test" → "failure")))
         }
     }
   }
@@ -341,7 +339,7 @@ object ProducerFeatureTest {
   class TestRoute(system: ActorSystem) extends RouteBuilder {
     val responder = system.actorOf(Props[TestResponder], name = "TestResponder")
 
-    def configure {
+    def configure: Unit = {
       from("direct:forward-test-1").to("mock:mock")
       // for one-way messaging tests
       from("direct:producer-test-1").to("mock:mock")
@@ -368,8 +366,8 @@ object ProducerFeatureTest {
 
   class IntermittentErrorConsumer(override val endpointUri: String) extends Consumer {
     def receive = {
-      case msg: CamelMessage if msg.bodyAs[String] == "fail" ⇒ sender ! Failure(new Exception("fail"))
-      case msg: CamelMessage                                 ⇒ sender ! msg
+      case msg: CamelMessage if msg.bodyAs[String] == "fail" ⇒ sender() ! Failure(new Exception("fail"))
+      case msg: CamelMessage                                 ⇒ sender() ! msg
     }
   }
 

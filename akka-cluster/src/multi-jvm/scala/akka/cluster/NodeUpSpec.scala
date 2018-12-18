@@ -1,10 +1,9 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
-import com.typesafe.config.ConfigFactory
-import org.scalatest.BeforeAndAfter
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
@@ -32,14 +31,25 @@ abstract class NodeUpSpec
   import ClusterEvent._
 
   "A cluster node that is joining another cluster" must {
-    "be moved to UP by the leader after a convergence" taggedAs LongRunningTest in {
+    "not be able to join a node that is not a cluster member" in {
 
+      runOn(first) {
+        cluster.join(second)
+      }
+      enterBarrier("first-join-attempt")
+
+      Thread.sleep(2000)
+      clusterView.members should ===(Set.empty)
+
+      enterBarrier("after-0")
+    }
+
+    "be moved to UP by the leader after a convergence" in {
       awaitClusterUp(first, second)
-
       enterBarrier("after-1")
     }
 
-    "be unaffected when joining again" taggedAs LongRunningTest in {
+    "be unaffected when joining again" in {
 
       val unexpected = new AtomicReference[SortedSet[Member]](SortedSet.empty)
       cluster.subscribe(system.actorOf(Props(new Actor {
@@ -59,8 +69,8 @@ abstract class NodeUpSpec
       // let it run for a while to make sure that nothing bad happens
       for (n ← 1 to 20) {
         Thread.sleep(100.millis.dilated.toMillis)
-        unexpected.get must be(SortedSet.empty)
-        clusterView.members.forall(_.status == MemberStatus.Up) must be(true)
+        unexpected.get should ===(SortedSet.empty)
+        clusterView.members.forall(_.status == MemberStatus.Up) should ===(true)
       }
 
       enterBarrier("after-2")

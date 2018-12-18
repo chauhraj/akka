@@ -1,20 +1,23 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote
 
+import akka.event.Logging.Warning
 import akka.remote.FailureDetector.Clock
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.TimeUnit.MILLISECONDS
 import scala.annotation.tailrec
 import scala.concurrent.duration.Duration
 import scala.concurrent.duration.FiniteDuration
 import scala.collection.immutable
 import com.typesafe.config.Config
+import akka.event.EventStream
+import akka.util.Helpers.ConfigOps
 
 /**
  * Implementation of 'The Phi Accrual Failure Detector' by Hayashibara et al. as defined in their paper:
- * [http://ddg.jaist.ac.jp/pub/HDY+04.pdf]
+ * [http://www.jaist.ac.jp/~defago/files/pdf/IS_RR_2004_010.pdf]
  *
  * The suspicion level of failure is given by a value called φ (phi).
  * The basic idea of the φ failure detector is to express the value of φ on a scale that
@@ -32,33 +35,42 @@ import com.typesafe.config.Config
  * @param threshold A low threshold is prone to generate many wrong suspicions but ensures a quick detection in the event
  *   of a real crash. Conversely, a high threshold generates fewer mistakes but needs more time to detect
  *   actual crashes
- *
  * @param maxSampleSize Number of samples to use for calculation of mean and standard deviation of
  *   inter-arrival times.
- *
  * @param minStdDeviation Minimum standard deviation to use for the normal distribution used when calculating phi.
  *   Too low standard deviation might result in too much sensitivity for sudden, but normal, deviations
  *   in heartbeat inter arrival times.
- *
  * @param acceptableHeartbeatPause Duration corresponding to number of potentially lost/delayed
  *   heartbeats that will be accepted before considering it to be an anomaly.
  *   This margin is important to be able to survive sudden, occasional, pauses in heartbeat
  *   arrivals, due to for example garbage collect or network drop.
- *
  * @param firstHeartbeatEstimate Bootstrap the stats with heartbeats that corresponds to
  *   to this duration, with a with rather high standard deviation (since environment is unknown
  *   in the beginning)
- *
  * @param clock The clock, returning current time in milliseconds, but can be faked for testing
  *   purposes. It is only used for measuring intervals (duration).
  */
 class PhiAccrualFailureDetector(
-  val threshold: Double,
-  val maxSampleSize: Int,
-  val minStdDeviation: FiniteDuration,
+  val threshold:                Double,
+  val maxSampleSize:            Int,
+  val minStdDeviation:          FiniteDuration,
   val acceptableHeartbeatPause: FiniteDuration,
-  val firstHeartbeatEstimate: FiniteDuration)(
-    implicit clock: Clock) extends FailureDetector {
+  val firstHeartbeatEstimate:   FiniteDuration,
+  eventStream:                  Option[EventStream])(
+  implicit
+  clock: Clock) extends FailureDetector {
+
+  /**
+   * Constructor without eventStream to support backwards compatibility
+   */
+  def this(
+    threshold:                Double,
+    maxSampleSize:            Int,
+    minStdDeviation:          FiniteDuration,
+    acceptableHeartbeatPause: FiniteDuration,
+    firstHeartbeatEstimate:   FiniteDuration)(implicit clock: Clock) =
+    this(
+      threshold, maxSampleSize, minStdDeviation, acceptableHeartbeatPause, firstHeartbeatEstimate, None)(clock)
 
   /**
    * Constructor that reads parameters from config.
@@ -66,13 +78,14 @@ class PhiAccrualFailureDetector(
    * `min-std-deviation`, `acceptable-heartbeat-pause` and
    * `heartbeat-interval`.
    */
-  def this(config: Config) =
+  def this(config: Config, ev: EventStream) =
     this(
       threshold = config.getDouble("threshold"),
       maxSampleSize = config.getInt("max-sample-size"),
-      minStdDeviation = Duration(config.getMilliseconds("min-std-deviation"), MILLISECONDS),
-      acceptableHeartbeatPause = Duration(config.getMilliseconds("acceptable-heartbeat-pause"), MILLISECONDS),
-      firstHeartbeatEstimate = Duration(config.getMilliseconds("heartbeat-interval"), MILLISECONDS))
+      minStdDeviation = config.getMillisDuration("min-std-deviation"),
+      acceptableHeartbeatPause = config.getMillisDuration("acceptable-heartbeat-pause"),
+      firstHeartbeatEstimate = config.getMillisDuration("heartbeat-interval"),
+      Some(ev))
 
   require(threshold > 0.0, "failure-detector.threshold must be > 0")
   require(maxSampleSize > 0, "failure-detector.max-sample-size must be > 0")
@@ -91,15 +104,20 @@ class PhiAccrualFailureDetector(
 
   private val acceptableHeartbeatPauseMillis = acceptableHeartbeatPause.toMillis
 
+  // address below was introduced as a var because of binary compatibility constraints
+  private[akka] var address: String = "N/A"
+
   /**
    * Implement using optimistic lockless concurrency, all state is represented
    * by this immutable case class and managed by an AtomicReference.
    */
-  private case class State(history: HeartbeatHistory, timestamp: Option[Long])
+  private final case class State(history: HeartbeatHistory, timestamp: Option[Long])
 
   private val state = new AtomicReference[State](State(history = firstHeartbeat, timestamp = None))
 
-  override def isAvailable: Boolean = phi < threshold
+  override def isAvailable: Boolean = isAvailable(clock())
+
+  private def isAvailable(timestamp: Long): Boolean = phi(timestamp) < threshold
 
   override def isMonitoring: Boolean = state.get.timestamp.nonEmpty
 
@@ -117,7 +135,12 @@ class PhiAccrualFailureDetector(
       case Some(latestTimestamp) ⇒
         // this is a known connection
         val interval = timestamp - latestTimestamp
-        oldState.history :+ interval
+        // don't use the first heartbeat after failure for the history, since a long pause will skew the stats
+        if (isAvailable(timestamp)) {
+          if (interval >= (acceptableHeartbeatPauseMillis / 3 * 2) && eventStream.isDefined)
+            eventStream.get.publish(Warning(this.toString, getClass, s"heartbeat interval is growing too large for address $address: $interval millis"))
+          oldState.history :+ interval
+        } else oldState.history
     }
 
     val newState = oldState.copy(history = newHistory, timestamp = Some(timestamp)) // record new timestamp
@@ -132,13 +155,15 @@ class PhiAccrualFailureDetector(
    * If a connection does not have any records in failure detector then it is
    * considered healthy.
    */
-  def phi: Double = {
+  def phi: Double = phi(clock())
+
+  private def phi(timestamp: Long): Double = {
     val oldState = state.get
     val oldTimestamp = oldState.timestamp
 
     if (oldTimestamp.isEmpty) 0.0 // treat unmanaged connections, e.g. with zero heartbeats, as healthy connections
     else {
-      val timeDiff = clock() - oldTimestamp.get
+      val timeDiff = timestamp - oldTimestamp.get
 
       val history = oldState.history
       val mean = history.mean
@@ -148,23 +173,28 @@ class PhiAccrualFailureDetector(
     }
   }
 
-  private[akka] def phi(timeDiff: Long, mean: Double, stdDeviation: Double): Double =
-    -math.log10(1.0 - cumulativeDistributionFunction(timeDiff, mean, stdDeviation))
+  /**
+   * Calculation of phi, derived from the Cumulative distribution function for
+   * N(mean, stdDeviation) normal distribution, given by
+   * 1.0 / (1.0 + math.exp(-y * (1.5976 + 0.070566 * y * y)))
+   * where y = (x - mean) / standard_deviation
+   * This is an approximation defined in β Mathematics Handbook (Logistic approximation).
+   * Error is 0.00014 at +- 3.16
+   * The calculated value is equivalent to -log10(1 - CDF(y))
+   */
+  private[akka] def phi(timeDiff: Long, mean: Double, stdDeviation: Double): Double = {
+    val y = (timeDiff - mean) / stdDeviation
+    val e = math.exp(-y * (1.5976 + 0.070566 * y * y))
+    if (timeDiff > mean)
+      -math.log10(e / (1.0 + e))
+    else
+      -math.log10(1.0 - 1.0 / (1.0 + e))
+  }
 
   private val minStdDeviationMillis = minStdDeviation.toMillis
 
   private def ensureValidStdDeviation(stdDeviation: Double): Double = math.max(stdDeviation, minStdDeviationMillis)
 
-  /**
-   * Cumulative distribution function for N(mean, stdDeviation) normal distribution.
-   * This is an approximation defined in β Mathematics Handbook (Logistic approximation).
-   * Error is 0.00014 at +- 3.16
-   */
-  private[akka] def cumulativeDistributionFunction(x: Double, mean: Double, stdDeviation: Double): Double = {
-    val y = (x - mean) / stdDeviation
-    // Cumulative distribution function for N(0, 1)
-    1.0 / (1.0 + math.exp(-y * (1.5976 + 0.070566 * y * y)))
-  }
 }
 
 private[akka] object HeartbeatHistory {
@@ -173,7 +203,7 @@ private[akka] object HeartbeatHistory {
    * Create an empty HeartbeatHistory, without any history.
    * Can only be used as starting point for appending intervals.
    * The stats (mean, variance, stdDeviation) are not defined for
-   * for empty HeartbeatHistory, i.e. throws AritmeticException.
+   * for empty HeartbeatHistory, i.e. throws ArithmeticException.
    */
   def apply(maxSampleSize: Int): HeartbeatHistory = HeartbeatHistory(
     maxSampleSize = maxSampleSize,
@@ -188,12 +218,12 @@ private[akka] object HeartbeatHistory {
  * It is capped by the number of samples specified in `maxSampleSize`.
  *
  * The stats (mean, variance, stdDeviation) are not defined for
- * for empty HeartbeatHistory, i.e. throws AritmeticException.
+ * for empty HeartbeatHistory, i.e. throws ArithmeticException.
  */
-private[akka] case class HeartbeatHistory private (
-  maxSampleSize: Int,
-  intervals: immutable.IndexedSeq[Long],
-  intervalSum: Long,
+private[akka] final case class HeartbeatHistory private (
+  maxSampleSize:      Int,
+  intervals:          immutable.IndexedSeq[Long],
+  intervalSum:        Long,
   squaredIntervalSum: Long) {
 
   // Heartbeat histories are created trough the firstHeartbeat variable of the PhiAccrualFailureDetector

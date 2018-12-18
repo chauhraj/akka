@@ -1,10 +1,11 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote.transport
 
 import akka.actor._
-import akka.pattern.{ ask, pipe }
+import akka.pattern.{ ask, pipe, gracefulStop }
 import akka.remote.Remoting.RegisterTransportActor
 import akka.remote.transport.Transport._
 import akka.remote.RARP
@@ -12,7 +13,9 @@ import akka.util.Timeout
 import scala.collection.immutable
 import scala.concurrent.duration._
 import scala.concurrent.{ ExecutionContext, Promise, Future }
-import scala.util.Success
+import akka.dispatch.{ UnboundedMessageQueueSemantics, RequiresMessageQueue }
+import akka.remote.transport.AssociationHandle.DisassociateInfo
+import akka.actor.DeadLetterSuppression
 
 trait TransportAdapterProvider {
   /**
@@ -25,14 +28,14 @@ class TransportAdapters(system: ExtendedActorSystem) extends Extension {
   val settings = RARP(system).provider.remoteSettings
 
   private val adaptersTable: Map[String, TransportAdapterProvider] = for ((name, fqn) ← settings.Adapters) yield {
-    name -> system.dynamicAccess.createInstanceFor[TransportAdapterProvider](fqn, immutable.Seq.empty).recover({
-      case exception ⇒ throw new IllegalArgumentException("Cannot instantiate transport adapter" + fqn, exception)
+    name → system.dynamicAccess.createInstanceFor[TransportAdapterProvider](fqn, immutable.Seq.empty).recover({
+      case e ⇒ throw new IllegalArgumentException(s"Cannot instantiate transport adapter [${fqn}]", e)
     }).get
   }
 
   def getAdapterProvider(name: String): TransportAdapterProvider = adaptersTable.get(name) match {
     case Some(provider) ⇒ provider
-    case None           ⇒ throw new IllegalArgumentException("There is no registered transport adapter provider with name: " + name)
+    case None           ⇒ throw new IllegalArgumentException(s"There is no registered transport adapter provider with name: [${name}]")
   }
 }
 
@@ -66,8 +69,9 @@ abstract class AbstractTransportAdapter(protected val wrappedTransport: Transpor
 
   protected def maximumOverhead: Int
 
-  protected def interceptListen(listenAddress: Address,
-                                listenerFuture: Future[AssociationEventListener]): Future[AssociationEventListener]
+  protected def interceptListen(
+    listenAddress:  Address,
+    listenerFuture: Future[AssociationEventListener]): Future[AssociationEventListener]
 
   protected def interceptAssociate(remoteAddress: Address, statusPromise: Promise[AssociationHandle]): Unit
 
@@ -88,6 +92,19 @@ abstract class AbstractTransportAdapter(protected val wrappedTransport: Transpor
     } yield (augmentScheme(listenAddress), upstreamListenerPromise)
   }
 
+  /**
+   * INTERNAL API
+   * @return
+   *  The address this Transport is listening to.
+   */
+  private[akka] def boundAddress: Address = wrappedTransport match {
+    // Need to do like this in the backport of #15007 to 2.3.x for binary compatibility reasons
+    case t: AbstractTransportAdapter ⇒ t.boundAddress
+    case t: netty.NettyTransport     ⇒ t.boundAddress
+    case t: TestTransport            ⇒ t.boundAddress
+    case _                           ⇒ null
+  }
+
   override def associate(remoteAddress: Address): Future[AssociationHandle] = {
     // Prepare a future, and pass its promise to the manager
     val statusPromise: Promise[AssociationHandle] = Promise()
@@ -97,18 +114,20 @@ abstract class AbstractTransportAdapter(protected val wrappedTransport: Transpor
     statusPromise.future
   }
 
-  override def shutdown(): Unit = wrappedTransport.shutdown()
+  override def shutdown(): Future[Boolean] = wrappedTransport.shutdown()
 
 }
 
-abstract class AbstractTransportAdapterHandle(val originalLocalAddress: Address,
-                                              val originalRemoteAddress: Address,
-                                              val wrappedHandle: AssociationHandle,
-                                              val addedSchemeIdentifier: String) extends AssociationHandle
+abstract class AbstractTransportAdapterHandle(
+  val originalLocalAddress:  Address,
+  val originalRemoteAddress: Address,
+  val wrappedHandle:         AssociationHandle,
+  val addedSchemeIdentifier: String) extends AssociationHandle
   with SchemeAugmenter {
 
   def this(wrappedHandle: AssociationHandle, addedSchemeIdentifier: String) =
-    this(wrappedHandle.localAddress,
+    this(
+      wrappedHandle.localAddress,
       wrappedHandle.remoteAddress,
       wrappedHandle,
       addedSchemeIdentifier)
@@ -119,13 +138,15 @@ abstract class AbstractTransportAdapterHandle(val originalLocalAddress: Address,
 }
 
 object ActorTransportAdapter {
-  sealed trait TransportOperation
+  sealed trait TransportOperation extends NoSerializationVerificationNeeded
 
-  case class ListenerRegistered(listener: AssociationEventListener) extends TransportOperation
-  case class AssociateUnderlying(remoteAddress: Address, statusPromise: Promise[AssociationHandle]) extends TransportOperation
-  case class ListenUnderlying(listenAddress: Address,
-                              upstreamListener: Future[AssociationEventListener]) extends TransportOperation
-  case object DisassociateUnderlying extends TransportOperation
+  final case class ListenerRegistered(listener: AssociationEventListener) extends TransportOperation
+  final case class AssociateUnderlying(remoteAddress: Address, statusPromise: Promise[AssociationHandle]) extends TransportOperation
+  final case class ListenUnderlying(
+    listenAddress:    Address,
+    upstreamListener: Future[AssociationEventListener]) extends TransportOperation
+  final case class DisassociateUnderlying(info: DisassociateInfo = AssociationHandle.Unknown)
+    extends TransportOperation with DeadLetterSuppression
 
   implicit val AskTimeout = Timeout(5.seconds)
 }
@@ -140,12 +161,12 @@ abstract class ActorTransportAdapter(wrappedTransport: Transport, system: ActorS
   // Write once variable initialized when Listen is called.
   @volatile protected var manager: ActorRef = _
 
-  // FIXME #3074 how to replace actorFor here?
   private def registerManager(): Future[ActorRef] =
-    (system.actorFor("/system/transports") ? RegisterTransportActor(managerProps, managerName)).mapTo[ActorRef]
+    (system.actorSelection("/system/transports") ? RegisterTransportActor(managerProps, managerName)).mapTo[ActorRef]
 
-  override def interceptListen(listenAddress: Address,
-                               listenerPromise: Future[AssociationEventListener]): Future[AssociationEventListener] = {
+  override def interceptListen(
+    listenAddress:   Address,
+    listenerPromise: Future[AssociationEventListener]): Future[AssociationEventListener] = {
     registerManager().map { mgr ⇒
       // Side effecting: storing the manager instance in volatile var
       // This is done only once: during the initialization of the protocol stack. The variable manager is not read
@@ -159,10 +180,15 @@ abstract class ActorTransportAdapter(wrappedTransport: Transport, system: ActorS
   override def interceptAssociate(remoteAddress: Address, statusPromise: Promise[AssociationHandle]): Unit =
     manager ! AssociateUnderlying(remoteAddress, statusPromise)
 
-  override def shutdown(): Unit = manager ! PoisonPill
+  override def shutdown(): Future[Boolean] =
+    for {
+      stopResult ← gracefulStop(manager, RARP(system).provider.remoteSettings.FlushWait)
+      wrappedStopResult ← wrappedTransport.shutdown()
+    } yield stopResult && wrappedStopResult
 }
 
-abstract class ActorTransportAdapterManager extends Actor {
+abstract class ActorTransportAdapterManager extends Actor
+  with RequiresMessageQueue[UnboundedMessageQueueSemantics] {
   import ActorTransportAdapter.{ ListenUnderlying, ListenerRegistered }
 
   private var delayedEvents = immutable.Queue.empty[Any]

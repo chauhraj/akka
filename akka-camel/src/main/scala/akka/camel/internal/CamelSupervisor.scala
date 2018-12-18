@@ -1,6 +1,7 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.camel.internal
 
 import akka.actor._
@@ -13,14 +14,15 @@ import akka.actor.SupervisorStrategy.Resume
 import akka.camel.internal.CamelSupervisor._
 import akka.AkkaException
 import akka.camel.internal.ActivationProtocol._
+import akka.event.Logging
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Top level supervisor for internal Camel actors
  */
 private[camel] class CamelSupervisor extends Actor with CamelSupport {
   private val activationTracker = context.actorOf(Props[ActivationTracker], "activationTracker")
-  private val registry: ActorRef = context.actorOf(Props(new Registry(activationTracker)), "registry")
+  private val registry: ActorRef = context.actorOf(Props(classOf[Registry], activationTracker), "registry")
 
   override val supervisorStrategy = OneForOneStrategy() {
     case NonFatal(e) ⇒
@@ -36,7 +38,7 @@ private[camel] class CamelSupervisor extends Actor with CamelSupport {
 }
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Messages for the camel supervisor, registrations and de-registrations.
  */
 private[camel] object CamelSupervisor {
@@ -45,57 +47,69 @@ private[camel] object CamelSupervisor {
   sealed trait CamelSupervisorMessage extends Serializable
 
   /**
-   * For internal use only.
+   * INTERNAL API
    * Registers a consumer or a producer.
    */
-  case class Register(actorRef: ActorRef, endpointUri: String, config: Option[ConsumerConfig] = None) extends NoSerializationVerificationNeeded
+  final case class Register(actorRef: ActorRef, endpointUri: String, config: Option[ConsumerConfig] = None) extends NoSerializationVerificationNeeded
 
   /**
-   * For internal use only.
+   * INTERNAL API
    * De-registers a producer or a consumer.
    */
   @SerialVersionUID(1L)
-  case class DeRegister(actorRef: ActorRef) extends CamelSupervisorMessage
+  final case class DeRegister(actorRef: ActorRef) extends CamelSupervisorMessage
 
   /**
-   * For internal use only.
+   * INTERNAL API
    * Adds a watch for the actor
    */
   @SerialVersionUID(1L)
-  case class AddWatch(actorRef: ActorRef) extends CamelSupervisorMessage
+  final case class AddWatch(actorRef: ActorRef) extends CamelSupervisorMessage
 
   /**
-   * For internal use only.
+   * INTERNAL API
    * Provides a Producer with the required camel objects to function.
    */
-  case class CamelProducerObjects(endpoint: Endpoint, processor: SendProcessor) extends NoSerializationVerificationNeeded
+  final case class CamelProducerObjects(endpoint: Endpoint, processor: SendProcessor) extends NoSerializationVerificationNeeded
 }
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Thrown by registrars to indicate that the actor could not be de-activated.
  */
-private[camel] class ActorDeActivationException(val actorRef: ActorRef, cause: Throwable) extends AkkaException("Actor [%s] failed to de-activate".format(actorRef), cause)
+private[camel] class ActorDeActivationException(val actorRef: ActorRef, cause: Throwable) extends AkkaException(s"$actorRef failed to de-activate", cause)
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Thrown by the registrars to indicate that the actor could not be activated.
  */
-private[camel] class ActorActivationException(val actorRef: ActorRef, cause: Throwable) extends AkkaException("Actor [%s] failed to activate".format(actorRef), cause)
+private[camel] class ActorActivationException(val actorRef: ActorRef, cause: Throwable) extends AkkaException(s"$actorRef failed to activate", cause)
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Registry for Camel Consumers and Producers. Supervises the registrars.
  */
 private[camel] class Registry(activationTracker: ActorRef) extends Actor with CamelSupport {
   import context.{ stop, parent }
 
-  private val producerRegistrar = context.actorOf(Props(new ProducerRegistrar(activationTracker)), "producerRegistrar")
-  private val consumerRegistrar = context.actorOf(Props(new ConsumerRegistrar(activationTracker)), "consumerRegistrar")
+  private val producerRegistrar = context.actorOf(Props(classOf[ProducerRegistrar], activationTracker), "producerRegistrar")
+  private val consumerRegistrar = context.actorOf(Props(classOf[ConsumerRegistrar], activationTracker), "consumerRegistrar")
   private var producers = Set[ActorRef]()
   private var consumers = Set[ActorRef]()
 
-  override val supervisorStrategy = OneForOneStrategy() {
+  class RegistryLogStrategy()(_decider: SupervisorStrategy.Decider) extends OneForOneStrategy()(_decider) {
+    override def logFailure(context: ActorContext, child: ActorRef, cause: Throwable,
+                            decision: SupervisorStrategy.Directive): Unit =
+      cause match {
+        case _: ActorActivationException | _: ActorDeActivationException ⇒
+          try context.system.eventStream.publish {
+            Logging.Error(cause.getCause, child.path.toString, getClass, cause.getMessage)
+          } catch { case NonFatal(_) ⇒ }
+        case _ ⇒ super.logFailure(context, child, cause, decision)
+      }
+  }
+
+  override val supervisorStrategy = new RegistryLogStrategy()({
     case e: ActorActivationException ⇒
       activationTracker ! EndpointFailedToActivate(e.actorRef, e.getCause)
       stop(e.actorRef)
@@ -106,7 +120,7 @@ private[camel] class Registry(activationTracker: ActorRef) extends Actor with Ca
       Resume
     case NonFatal(e) ⇒
       Resume
-  }
+  })
 
   def receive = {
     case msg @ Register(consumer, _, Some(_)) ⇒
@@ -132,13 +146,13 @@ private[camel] class Registry(activationTracker: ActorRef) extends Actor with Ca
       }
   }
 
-  private def deRegisterConsumer(actorRef: ActorRef) { consumerRegistrar ! DeRegister(actorRef) }
+  private def deRegisterConsumer(actorRef: ActorRef): Unit = { consumerRegistrar ! DeRegister(actorRef) }
 
-  private def deRegisterProducer(actorRef: ActorRef) { producerRegistrar ! DeRegister(actorRef) }
+  private def deRegisterProducer(actorRef: ActorRef): Unit = { producerRegistrar ! DeRegister(actorRef) }
 }
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Registers Producers.
  */
 private[camel] class ProducerRegistrar(activationTracker: ActorRef) extends Actor with CamelSupport {
@@ -150,7 +164,7 @@ private[camel] class ProducerRegistrar(activationTracker: ActorRef) extends Acto
         try {
           val endpoint = camelContext.getEndpoint(endpointUri)
           val processor = new SendProcessor(endpoint)
-          camelObjects = camelObjects.updated(producer, endpoint -> processor)
+          camelObjects = camelObjects.updated(producer, endpoint → processor)
           // if this throws, the supervisor stops the producer and de-registers it on termination
           processor.start()
           producer ! CamelProducerObjects(endpoint, processor)
@@ -176,7 +190,7 @@ private[camel] class ProducerRegistrar(activationTracker: ActorRef) extends Acto
 }
 
 /**
- * For internal use only.
+ * INTERNAL API
  * Registers Consumers.
  */
 private[camel] class ConsumerRegistrar(activationTracker: ActorRef) extends Actor with CamelSupport {

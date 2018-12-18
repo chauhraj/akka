@@ -1,6 +1,7 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.testkit
 
 import java.io._
@@ -8,12 +9,11 @@ import java.lang.management.ManagementFactory
 import java.util.concurrent.Semaphore
 import java.util.concurrent.locks.ReentrantLock
 import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.Matchers
 import scala.concurrent.duration._
 import scala.concurrent.Await
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class CoronerSpec extends WordSpec with MustMatchers {
+class CoronerSpec extends WordSpec with Matchers {
 
   private def captureOutput[A](f: PrintStream ⇒ A): (A, String) = {
     val bytes = new ByteArrayOutputStream()
@@ -24,19 +24,35 @@ class CoronerSpec extends WordSpec with MustMatchers {
 
   "A Coroner" must {
 
-    "generate a report if enough time passes" taggedAs TimingTest in {
-      val (_, report) = captureOutput(out ⇒ Await.ready(Coroner.watch(100.milliseconds.fromNow, "XXXX", out), 1.second))
-      report must include("Coroner's Report")
-      report must include("XXXX")
+    "generate a report if enough time passes" in {
+      val (_, report) = captureOutput(out ⇒ {
+        val coroner = Coroner.watch(100.milliseconds, "XXXX", out)
+        Await.ready(coroner, 5.seconds)
+        coroner.cancel()
+      })
+      report should include("Coroner's Report")
+      report should include("XXXX")
     }
 
-    "not generate a report if cancelled early" taggedAs TimingTest in {
+    "not generate a report if cancelled early" in {
       val (_, report) = captureOutput(out ⇒ {
-        val coroner = Coroner.watch(100.milliseconds.fromNow, "XXXX", out)
+        val coroner = Coroner.watch(60.seconds, "XXXX", out)
+        coroner.cancel()
+        Await.ready(coroner, 1.seconds)
+      })
+      report should ===("")
+    }
+
+    "display thread counts if enabled" in {
+      val (_, report) = captureOutput(out ⇒ {
+        val coroner = Coroner.watch(60.seconds, "XXXX", out, displayThreadCounts = true)
         coroner.cancel()
         Await.ready(coroner, 1.second)
       })
-      report must be("")
+      report should include("Coroner Thread Count starts at ")
+      report should include("Coroner Thread Count started at ")
+      report should include("XXXX")
+      report should not include ("Coroner's Report")
     }
 
     "display deadlock information in its report" in {
@@ -47,7 +63,7 @@ class CoronerSpec extends WordSpec with MustMatchers {
       // that the other wants to synchronize on. BOOM! Deadlock. Generate a
       // report, then clean up and check the report contents.
 
-      case class LockingThread(name: String, thread: Thread, ready: Semaphore, proceed: Semaphore)
+      final case class LockingThread(name: String, thread: Thread, ready: Semaphore, proceed: Semaphore)
 
       def lockingThread(name: String, initialLocks: List[ReentrantLock]): LockingThread = {
         val ready = new Semaphore(0)
@@ -55,7 +71,7 @@ class CoronerSpec extends WordSpec with MustMatchers {
         val t = new Thread(new Runnable {
           def run = try recursiveLock(initialLocks) catch { case _: InterruptedException ⇒ () }
 
-          def recursiveLock(locks: List[ReentrantLock]) {
+          def recursiveLock(locks: List[ReentrantLock]): Unit = {
             locks match {
               case Nil ⇒ ()
               case lock :: rest ⇒ {
@@ -95,7 +111,7 @@ class CoronerSpec extends WordSpec with MustMatchers {
       a.thread.interrupt()
       b.thread.interrupt()
 
-      report must include("Coroner's Report")
+      report should include("Coroner's Report")
 
       // Split test based on JVM capabilities. Not all JVMs can detect
       // deadlock between ReentrantLocks. However, we need to use
@@ -105,17 +121,17 @@ class CoronerSpec extends WordSpec with MustMatchers {
       val threadMx = ManagementFactory.getThreadMXBean()
       if (threadMx.isSynchronizerUsageSupported()) {
         val sectionHeading = "Deadlocks found for monitors and ownable synchronizers"
-        report must include(sectionHeading)
+        report should include(sectionHeading)
         val deadlockSection = report.split(sectionHeading)(1)
-        deadlockSection must include("deadlock-thread-a")
-        deadlockSection must include("deadlock-thread-b")
+        deadlockSection should include("deadlock-thread-a")
+        deadlockSection should include("deadlock-thread-b")
       } else {
         val sectionHeading = "Deadlocks found for monitors, but NOT ownable synchronizers"
-        report must include(sectionHeading)
+        report should include(sectionHeading)
         val deadlockSection = report.split(sectionHeading)(1)
-        deadlockSection must include("None")
-        deadlockSection must not include ("deadlock-thread-a")
-        deadlockSection must not include ("deadlock-thread-b")
+        deadlockSection should include("None")
+        deadlockSection should not include ("deadlock-thread-a")
+        deadlockSection should not include ("deadlock-thread-b")
       }
     }
 

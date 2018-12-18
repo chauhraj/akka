@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 option java_package = "akka.cluster.protobuf.msg";
@@ -41,31 +41,54 @@ message Welcome {
 
 /**
  * InitJoin
- * Sends Empty
  */
+message InitJoin {
+  optional string currentConfig = 1;
+}
 
 /**
  * InitJoinAck
- * Sends an Address
  */
+message InitJoinAck {
+  required Address address = 1;
+  required ConfigCheck configCheck = 2;
+}
+
+message ConfigCheck {
+  extensions 100 to 102;
+
+  enum Type {
+    UncheckedConfig = 1;
+    IncompatibleConfig = 2;
+    CompatibleConfig = 3;
+  }
+  required Type type = 1;
+
+  optional string clusterConfig = 2;
+}
+
+message UncheckedConfig {
+  extend ConfigCheck {
+    required UncheckedConfig checkConfig = 100;
+  }
+}
+
+message IncompatibleConfig {
+  extend ConfigCheck {
+    required IncompatibleConfig checkConfig = 101;
+  }
+}
+
+message CompatibleConfig {
+  extend ConfigCheck {
+    required CompatibleConfig checkConfig = 102;
+  }
+  required string clusterConfig = 2;
+}
 
 /**
  * InitJoinNack
  * Sends an Address
- */
-
-/****************************************
- * Cluster Leader Action Messages
- ****************************************/
-
-/**
- * Exit
- * Sends a UniqueAddress
- */
-
-/**
- * Shutdown
- * Sends a UniqueAddress
  */
 
 
@@ -79,13 +102,8 @@ message Welcome {
  */
 
 /**
- * EndHeartbeat
- * Sends an Address
- */
-
-/**
- * HeartbeatRequest
- * Sends an Address
+ * HeartbeatRsp
+ * Sends an UniqueAddress
  */
 
 /****************************************
@@ -98,8 +116,16 @@ message Welcome {
 message GossipEnvelope {
   required UniqueAddress from = 1;
   required UniqueAddress to = 2;
-  required Gossip gossip = 3;
-  required bool conversation = 4;
+  required bytes serializedGossip = 3;
+}
+
+/**
+ * Gossip Status
+ */
+message GossipStatus {
+  required UniqueAddress from = 1;
+  repeated string allHashes = 2;
+  required VectorClock version = 3;
 }
 
 /**
@@ -112,27 +138,56 @@ message Gossip {
   repeated Member members = 4;
   required GossipOverview overview = 5;
   required VectorClock version = 6;
+  repeated Tombstone tombstones = 7;
 }
 
 /**
  * Gossip Overview
  */
 message GossipOverview {
-  message Seen {
-    required int32 addressIndex = 1;
-    required VectorClock version = 2;
-  }
-  repeated Seen seen = 1;
-  repeated Member unreachable = 2;
+  /* This is the address indexes for the nodes that have seen this gossip */
+  repeated int32 seen = 1;
+  repeated ObserverReachability observerReachability = 2;
 }
+
+/**
+ * Reachability
+ */
+message ObserverReachability {
+  required int32 addressIndex = 1;
+  required int64 version = 4;
+  repeated SubjectReachability subjectReachability = 2;
+}
+
+message SubjectReachability {
+  required int32 addressIndex = 1;
+  required ReachabilityStatus status = 3;
+  required int64 version = 4;
+}
+
+message Tombstone {
+  required int32 addressIndex = 1;
+  required int64 timestamp = 2;
+}
+
+/**
+ * Reachability status
+ */
+enum ReachabilityStatus {
+  Reachable = 0;
+  Unreachable = 1;
+  Terminated = 2;
+}
+
 
 /**
  * Member
  */
 message Member {
   required int32 addressIndex = 1;
-  required MemberStatus status = 2;
-  repeated int32 rolesIndexes = 3 [packed = true];
+  required int32 upNumber = 2;
+  required MemberStatus status = 3;
+  repeated int32 rolesIndexes = 4 [packed = true];
 }
 
 /**
@@ -145,6 +200,7 @@ enum MemberStatus {
   Exiting = 3;
   Down = 4;
   Removed = 5;
+  WeaklyUp = 6;
 }
 
 /**
@@ -155,61 +211,9 @@ message VectorClock {
     required int32 hashIndex = 1;
     required int64 timestamp = 2;
   }
-  required int64 timestamp = 1;
+  // the timestamp could be removed but left for test data compatibility
+  optional int64 timestamp = 1;
   repeated Version versions = 2;
-}
-
-/****************************************
- * Metrics Gossip Messages
- ****************************************/
-
-/**
- * Metrics Gossip Envelope
- */
-message MetricsGossipEnvelope {
-  required Address from = 1;
-  required MetricsGossip gossip = 2;
-  required bool reply = 3;
-}
-
-/**
- * Metrics Gossip
- */
-message MetricsGossip {
-  repeated Address allAddresses = 1;
-  repeated string allMetricNames = 2;
-  repeated NodeMetrics nodeMetrics = 3;
-}
-
-/**
- * Node Metrics
- */
-message NodeMetrics {
-  enum NumberType {
-    Serialized = 0;
-    Double = 1;
-    Float = 2;
-    Integer = 3;
-    Long = 4;
-  }
-  message Number {
-    required NumberType type = 1;
-    optional uint32 value32 = 2;
-    optional uint64 value64 = 3;
-    optional bytes serialized = 4;
-  }
-  message EWMA {
-    required double value = 1;
-    required double alpha = 2;
-  }
-  message Metric {
-    required int32 nameIndex = 1;
-    required Number number = 2;
-    optional EWMA ewma = 3;
-  }
-  required int32 addressIndex = 1;
-  required int64 timestamp = 2;
-  repeated Metric metrics = 3;
 }
 
 /****************************************
@@ -219,7 +223,7 @@ message NodeMetrics {
 /**
  * An empty message
  */
- message Empty {
+message Empty {
  }
 
 /**
@@ -238,4 +242,29 @@ message Address {
 message UniqueAddress {
   required Address address = 1;
   required uint32 uid = 2;
+  // 64 bit uids but with backward wire compatibility
+  optional uint32 uid2 = 3;
 }
+
+/****************************************
+ * Cluster routing
+ ****************************************/
+
+message ClusterRouterPool {
+   required Pool pool = 1;
+   required ClusterRouterPoolSettings settings = 2;
+ }
+
+message Pool {
+   required uint32 serializerId = 1;
+   required string manifest = 2;
+   required bytes data = 3;
+ }
+
+message ClusterRouterPoolSettings {
+   required uint32 totalInstances = 1;
+   required uint32 maxInstancesPerNode = 2;
+   required bool allowLocalRoutees = 3;
+   optional string useRole = 4;
+   repeated string useRoles = 5;
+ }

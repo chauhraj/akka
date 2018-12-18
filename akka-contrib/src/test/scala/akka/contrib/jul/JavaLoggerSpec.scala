@@ -1,13 +1,13 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.contrib.jul
 
 import com.typesafe.config.ConfigFactory
-import akka.actor.{ ActorSystem, Actor, ActorLogging, Props }
+import akka.actor.{ Actor, ActorLogging, Props }
 import akka.testkit.AkkaSpec
 import java.util.logging
-import java.io.ByteArrayInputStream
 
 object JavaLoggerSpec {
 
@@ -27,18 +27,17 @@ object JavaLoggerSpec {
   }
 }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class JavaLoggerSpec extends AkkaSpec(JavaLoggerSpec.config) {
 
   val logger = logging.Logger.getLogger("akka://JavaLoggerSpec/user/log")
   logger.setUseParentHandlers(false) // turn off output of test LogRecords
   logger.addHandler(new logging.Handler {
-    def publish(record: logging.LogRecord) {
+    def publish(record: logging.LogRecord): Unit = {
       testActor ! record
     }
 
-    def flush() {}
-    def close() {}
+    def flush(): Unit = {}
+    def close(): Unit = {}
   })
 
   val producer = system.actorOf(Props[JavaLoggerSpec.LogProducer], name = "log")
@@ -50,14 +49,14 @@ class JavaLoggerSpec extends AkkaSpec(JavaLoggerSpec.config) {
 
       val record = expectMsgType[logging.LogRecord]
 
-      record must not be (null)
-      record.getMillis must not be (0)
-      record.getThreadID must not be (0)
-      record.getLevel must be(logging.Level.SEVERE)
-      record.getMessage must be("Simulated error")
-      record.getThrown.isInstanceOf[RuntimeException] must be(true)
-      record.getSourceClassName must be(classOf[JavaLoggerSpec.LogProducer].getName)
-      record.getSourceMethodName must be(null)
+      record should not be (null)
+      record.getMillis should not be (0)
+      record.getThreadID should not be (0)
+      record.getLevel should ===(logging.Level.SEVERE)
+      record.getMessage should ===("Simulated error")
+      record.getThrown.isInstanceOf[RuntimeException] should ===(true)
+      record.getSourceClassName should ===(classOf[JavaLoggerSpec.LogProducer].getName)
+      record.getSourceMethodName should ===(null)
     }
 
     "log info without stackTrace" in {
@@ -65,14 +64,14 @@ class JavaLoggerSpec extends AkkaSpec(JavaLoggerSpec.config) {
 
       val record = expectMsgType[logging.LogRecord]
 
-      record must not be (null)
-      record.getMillis must not be (0)
-      record.getThreadID must not be (0)
-      record.getLevel must be(logging.Level.INFO)
-      record.getMessage must be("3 is the magic number")
-      record.getThrown must be(null)
-      record.getSourceClassName must be(classOf[JavaLoggerSpec.LogProducer].getName)
-      record.getSourceMethodName must be(null)
+      record should not be (null)
+      record.getMillis should not be (0)
+      record.getThreadID should not be (0)
+      record.getLevel should ===(logging.Level.INFO)
+      record.getMessage should ===("3 is the magic number")
+      record.getThrown should ===(null)
+      record.getSourceClassName should ===(classOf[JavaLoggerSpec.LogProducer].getName)
+      record.getSourceMethodName should ===(null)
     }
   }
 

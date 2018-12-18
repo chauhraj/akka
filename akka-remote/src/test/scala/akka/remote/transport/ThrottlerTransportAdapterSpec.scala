@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2018 Lightbend Inc. <https://www.lightbend.com>
+ */
+
 package akka.remote.transport
 
 import com.typesafe.config.{ ConfigFactory, Config }
@@ -15,11 +19,13 @@ import akka.remote.EndpointException
 object ThrottlerTransportAdapterSpec {
   val configA: Config = ConfigFactory parseString ("""
     akka {
-      actor.provider = "akka.remote.RemoteActorRefProvider"
+      actor.provider = remote
 
       remote.netty.tcp.hostname = "localhost"
-      remote.retry-gate-closed-for = 0 s
       remote.log-remote-lifecycle-events = off
+      remote.retry-gate-closed-for = 1 s
+      remote.transport-failure-detector.heartbeat-interval = 1 s
+      remote.transport-failure-detector.acceptable-heartbeat-pause = 3 s
 
       remote.netty.tcp.applied-adapters = ["trttl"]
       remote.netty.tcp.port = 0
@@ -28,8 +34,8 @@ object ThrottlerTransportAdapterSpec {
 
   class Echo extends Actor {
     override def receive = {
-      case "ping" ⇒ sender ! "pong"
-      case x      ⇒ sender ! x
+      case "ping" ⇒ sender() ! "pong"
+      case x      ⇒ sender() ! x
     }
   }
 
@@ -57,6 +63,8 @@ object ThrottlerTransportAdapterSpec {
         if (received >= MessageCount) controller ! (System.nanoTime() - startTime)
     }
   }
+
+  final case class Lost(msg: String)
 }
 
 class ThrottlerTransportAdapterSpec extends AkkaSpec(configA) with ImplicitSender with DefaultTimeout {
@@ -84,50 +92,53 @@ class ThrottlerTransportAdapterSpec extends AkkaSpec(configA) with ImplicitSende
 
   "ThrottlerTransportAdapter" must {
     "maintain average message rate" taggedAs TimingTest in {
-      throttle(Direction.Send, TokenBucket(200, 500, 0, 0)) must be(true)
-      val tester = system.actorOf(Props(new ThrottlingTester(here, self))) ! "start"
+      throttle(Direction.Send, TokenBucket(200, 500, 0, 0)) should ===(true)
+      val tester = system.actorOf(Props(classOf[ThrottlingTester], here, self)) ! "start"
 
       val time = NANOSECONDS.toSeconds(expectMsgType[Long]((TotalTime + 3).seconds))
       log.warning("Total time of transmission: " + time)
-      time must be > (TotalTime - 3)
-      throttle(Direction.Send, Unthrottled) must be(true)
+      time should be > (TotalTime - 3)
+      throttle(Direction.Send, Unthrottled) should ===(true)
     }
 
-    "must survive blackholing" taggedAs TimingTest in {
-      here ! "Blackhole 1"
-      expectMsg("Blackhole 1")
+    "survive blackholing" taggedAs TimingTest in {
+      here ! Lost("Blackhole 1")
+      expectMsg(Lost("Blackhole 1"))
 
-      throttle(Direction.Both, Blackhole) must be(true)
+      muteDeadLetters(classOf[Lost])(system)
+      muteDeadLetters(classOf[Lost])(systemB)
 
-      here ! "Blackhole 2"
+      throttle(Direction.Both, Blackhole) should ===(true)
+
+      here ! Lost("Blackhole 2")
       expectNoMsg(1.seconds)
-      disassociate() must be(true)
+      disassociate() should ===(true)
       expectNoMsg(1.seconds)
 
-      throttle(Direction.Both, Unthrottled) must be(true)
+      throttle(Direction.Both, Unthrottled) should ===(true)
 
       // after we remove the Blackhole we can't be certain of the state
       // of the connection, repeat until success
-      here ! "Blackhole 3"
+      here ! Lost("Blackhole 3")
       awaitCond({
-        if (receiveOne(Duration.Zero) == "Blackhole 3")
+        if (receiveOne(Duration.Zero) == Lost("Blackhole 3"))
           true
         else {
-          here ! "Blackhole 3"
+          here ! Lost("Blackhole 3")
           false
         }
-      }, 5.seconds)
+      }, 15.seconds)
 
       here ! "Cleanup"
       fishForMessage(5.seconds) {
-        case "Cleanup"     ⇒ true
-        case "Blackhole 3" ⇒ false
+        case "Cleanup"           ⇒ true
+        case Lost("Blackhole 3") ⇒ false
       }
     }
 
   }
 
-  override def beforeTermination() {
+  override def beforeTermination(): Unit = {
     system.eventStream.publish(TestEvent.Mute(
       EventFilter.warning(source = "akka://AkkaProtocolStressTest/user/$a", start = "received dead letter"),
       EventFilter.warning(pattern = "received dead letter.*(InboundPayload|Disassociate)")))
@@ -137,7 +148,7 @@ class ThrottlerTransportAdapterSpec extends AkkaSpec(configA) with ImplicitSende
       EventFilter.warning(pattern = "received dead letter.*(InboundPayload|Disassociate)")))
   }
 
-  override def afterTermination(): Unit = systemB.shutdown()
+  override def afterTermination(): Unit = shutdown(systemB)
 }
 
 class ThrottlerTransportAdapterGenericSpec extends GenericTransportSpec(withAkkaProtocol = true) {

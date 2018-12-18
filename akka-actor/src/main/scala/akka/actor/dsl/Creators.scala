@@ -1,20 +1,11 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.actor.dsl
 
-import scala.concurrent.Await
 import akka.actor._
-import scala.collection.immutable.TreeSet
-import scala.concurrent.duration._
-import scala.collection.mutable.Queue
-import akka.util.Timeout
-import java.util.concurrent.TimeoutException
-import java.util.concurrent.atomic.AtomicInteger
-import akka.pattern.ask
 import scala.reflect.ClassTag
-import akka.dispatch.{ UnboundedDequeBasedMailbox, RequiresMessageQueue }
 
 trait Creators { this: ActorDSL.type ⇒
 

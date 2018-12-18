@@ -1,13 +1,14 @@
+/*
+ * Copyright (C) 2018 Lightbend Inc. <https://www.lightbend.com>
+ */
+
 package akka.dispatch
 
 import language.postfixOps
 
-import org.junit.runner.RunWith
-import org.scalatest.junit.JUnitRunner
 import com.typesafe.config.Config
 
 import akka.actor.{ Props, ActorSystem, Actor }
-import akka.pattern.ask
 import akka.testkit.{ DefaultTimeout, AkkaSpec }
 import scala.concurrent.duration._
 
@@ -33,7 +34,6 @@ object PriorityDispatcherSpec {
 
 }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class PriorityDispatcherSpec extends AkkaSpec(PriorityDispatcherSpec.config) with DefaultTimeout {
 
   "A PriorityDispatcher" must {
@@ -48,7 +48,7 @@ class PriorityDispatcherSpec extends AkkaSpec(PriorityDispatcherSpec.config) wit
     }
   }
 
-  def testOrdering(dispatcherKey: String) {
+  def testOrdering(dispatcherKey: String): Unit = {
     val msgs = (1 to 100) toList
 
     // It's important that the actor under test is not a top level actor
@@ -66,7 +66,7 @@ class PriorityDispatcherSpec extends AkkaSpec(PriorityDispatcherSpec.config) wit
 
         def receive = {
           case i: Int  ⇒ acc += i
-          case 'Result ⇒ sender ! acc.toList
+          case 'Result ⇒ sender() ! acc.toList
         }
       }).withDispatcher(dispatcherKey))
 
@@ -74,7 +74,7 @@ class PriorityDispatcherSpec extends AkkaSpec(PriorityDispatcherSpec.config) wit
 
     }))
 
-    expectMsgType[List[_]] must be === msgs
+    expectMsgType[List[Int]] should ===(msgs)
   }
 
 }

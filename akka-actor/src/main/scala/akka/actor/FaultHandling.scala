@@ -1,12 +1,15 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor
 
+import java.lang.reflect.InvocationTargetException
 import language.implicitConversions
 import java.lang.{ Iterable ⇒ JIterable }
 import java.util.concurrent.TimeUnit
 import akka.japi.Util.immutableSeq
+import akka.util.JavaDurationConverters._
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.immutable
 import scala.concurrent.duration.Duration
@@ -29,7 +32,7 @@ private[akka] case object ChildNameReserved extends ChildStats
  * ChildRestartStats is the statistics kept by every parent Actor for every child Actor
  * and is used for SupervisorStrategies to know how to deal with problems that occur for the children.
  */
-case class ChildRestartStats(child: ActorRef, var maxNrOfRetriesCount: Int = 0, var restartTimeWindowStartNanos: Long = 0L)
+final case class ChildRestartStats(child: ActorRef, var maxNrOfRetriesCount: Int = 0, var restartTimeWindowStartNanos: Long = 0L)
   extends ChildStats {
 
   def uid: Int = child.path.uid
@@ -145,18 +148,25 @@ object SupervisorStrategy extends SupervisorStrategyLowPriorityImplicits {
 
   /**
    * When supervisorStrategy is not specified for an actor this
-   * is used by default. The child will be stopped when
-   * [[akka.actor.ActorInitializationException]] or [[akka.ActorKilledException]]
-   * is thrown. It will be restarted for other `Exception` types.
+   * `Decider` is used by default in the supervisor strategy.
+   * The child will be stopped when [[akka.actor.ActorInitializationException]],
+   * [[akka.actor.ActorKilledException]], or [[akka.actor.DeathPactException]] is
+   * thrown. It will be restarted for other `Exception` types.
    * The error is escalated if it's a `Throwable`, i.e. `Error`.
    */
+  final val defaultDecider: Decider = {
+    case _: ActorInitializationException ⇒ Stop
+    case _: ActorKilledException         ⇒ Stop
+    case _: DeathPactException           ⇒ Stop
+    case _: Exception                    ⇒ Restart
+  }
+
+  /**
+   * When supervisorStrategy is not specified for an actor this
+   * is used by default. OneForOneStrategy with decider defined in
+   * [[#defaultDecider]].
+   */
   final val defaultStrategy: SupervisorStrategy = {
-    def defaultDecider: Decider = {
-      case _: ActorInitializationException ⇒ Stop
-      case _: ActorKilledException         ⇒ Stop
-      case _: DeathPactException           ⇒ Stop
-      case _: Exception                    ⇒ Restart
-    }
     OneForOneStrategy()(defaultDecider)
   }
 
@@ -287,20 +297,20 @@ abstract class SupervisorStrategy {
   def handleFailure(context: ActorContext, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Boolean = {
     val directive = decider.applyOrElse(cause, escalateDefault)
     directive match {
-      case d @ Resume ⇒
-        logFailure(context, child, cause, d)
+      case Resume ⇒
+        logFailure(context, child, cause, directive)
         resumeChild(child, cause)
         true
-      case d @ Restart ⇒
-        logFailure(context, child, cause, d)
+      case Restart ⇒
+        logFailure(context, child, cause, directive)
         processFailure(context, true, child, cause, stats, children)
         true
-      case d @ Stop ⇒
-        logFailure(context, child, cause, d)
+      case Stop ⇒
+        logFailure(context, child, cause, directive)
         processFailure(context, false, child, cause, stats, children)
         true
-      case d @ Escalate ⇒
-        logFailure(context, child, cause, d)
+      case Escalate ⇒
+        logFailure(context, child, cause, directive)
         false
     }
   }
@@ -318,10 +328,13 @@ abstract class SupervisorStrategy {
    * `Resume` failures are logged at `Warning` level.
    * `Stop` and `Restart` failures are logged at `Error` level.
    */
-  protected def logFailure(context: ActorContext, child: ActorRef, cause: Throwable, decision: Directive): Unit =
+  def logFailure(context: ActorContext, child: ActorRef, cause: Throwable, decision: Directive): Unit =
     if (loggingEnabled) {
       val logMessage = cause match {
-        case e: ActorInitializationException if e.getCause ne null ⇒ e.getCause.getMessage
+        case e: ActorInitializationException if e.getCause ne null ⇒ e.getCause match {
+          case ex: InvocationTargetException if ex.getCause ne null ⇒ ex.getCause.getMessage
+          case ex ⇒ ex.getMessage
+        }
         case e ⇒ e.getMessage
       }
       decision match {
@@ -365,28 +378,81 @@ abstract class SupervisorStrategy {
  * to all children when one fails, as opposed to [[akka.actor.OneForOneStrategy]] that applies
  * it only to the child actor that failed.
  *
- * @param maxNrOfRetries the number of times an actor is allowed to be restarted, negative value means no limit
+ * @param maxNrOfRetries the number of times a child actor is allowed to be restarted, negative value means no limit,
+ *   if the limit is exceeded the child actor is stopped
  * @param withinTimeRange duration of the time window for maxNrOfRetries, Duration.Inf means no window
  * @param decider mapping from Throwable to [[akka.actor.SupervisorStrategy.Directive]], you can also use a
- *   `Seq` of Throwables which maps the given Throwables to restarts, otherwise escalates.
+ *   [[scala.collection.immutable.Seq]] of Throwables which maps the given Throwables to restarts, otherwise escalates.
  * @param loggingEnabled the strategy logs the failure if this is enabled (true), by default it is enabled
  */
 case class AllForOneStrategy(
-  maxNrOfRetries: Int = -1,
-  withinTimeRange: Duration = Duration.Inf,
-  override val loggingEnabled: Boolean = true)(val decider: SupervisorStrategy.Decider)
+  maxNrOfRetries:              Int      = -1,
+  withinTimeRange:             Duration = Duration.Inf,
+  override val loggingEnabled: Boolean  = true)(val decider: SupervisorStrategy.Decider)
   extends SupervisorStrategy {
 
   import SupervisorStrategy._
 
+  /**
+   * Java API
+   */
   def this(maxNrOfRetries: Int, withinTimeRange: Duration, decider: SupervisorStrategy.JDecider, loggingEnabled: Boolean) =
     this(maxNrOfRetries, withinTimeRange, loggingEnabled)(SupervisorStrategy.makeDecider(decider))
 
+  /**
+   * Java API
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, decider: SupervisorStrategy.JDecider, loggingEnabled: Boolean) =
+    this(maxNrOfRetries, withinTimeRange.asScala, loggingEnabled)(SupervisorStrategy.makeDecider(decider))
+
+  /**
+   * Java API
+   */
   def this(maxNrOfRetries: Int, withinTimeRange: Duration, decider: SupervisorStrategy.JDecider) =
     this(maxNrOfRetries, withinTimeRange)(SupervisorStrategy.makeDecider(decider))
 
+  /**
+   * Java API
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, decider: SupervisorStrategy.JDecider) =
+    this(maxNrOfRetries, withinTimeRange.asScala)(SupervisorStrategy.makeDecider(decider))
+
+  /**
+   * Java API
+   */
   def this(maxNrOfRetries: Int, withinTimeRange: Duration, trapExit: JIterable[Class[_ <: Throwable]]) =
     this(maxNrOfRetries, withinTimeRange)(SupervisorStrategy.makeDecider(trapExit))
+
+  /**
+   * Java API
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, trapExit: JIterable[Class[_ <: Throwable]]) =
+    this(maxNrOfRetries, withinTimeRange.asScala)(SupervisorStrategy.makeDecider(trapExit))
+
+  /**
+   * Java API: compatible with lambda expressions
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: Duration, decider: SupervisorStrategy.Decider) =
+    this(maxNrOfRetries = maxNrOfRetries, withinTimeRange = withinTimeRange)(decider)
+
+  /**
+   * Java API: compatible with lambda expressions
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, decider: SupervisorStrategy.Decider) =
+    this(maxNrOfRetries = maxNrOfRetries, withinTimeRange = withinTimeRange.asScala)(decider)
+
+  /**
+   * Java API: compatible with lambda expressions
+   */
+  def this(loggingEnabled: Boolean, decider: SupervisorStrategy.Decider) =
+    this(loggingEnabled = loggingEnabled)(decider)
+
+  /**
+   * Java API: compatible with lambda expressions
+   */
+  def this(decider: SupervisorStrategy.Decider) =
+    this()(decider)
+
   /*
    *  this is a performance optimization to avoid re-allocating the pairs upon
    *  every call to requestRestartPermission, assuming that strategies are shared
@@ -411,26 +477,77 @@ case class AllForOneStrategy(
  * to the child actor that failed, as opposed to [[akka.actor.AllForOneStrategy]] that applies
  * it to all children.
  *
- * @param maxNrOfRetries the number of times an actor is allowed to be restarted, negative value means no limit
+ * @param maxNrOfRetries the number of times a child actor is allowed to be restarted, negative value means no limit,
+ *   if the limit is exceeded the child actor is stopped
  * @param withinTimeRange duration of the time window for maxNrOfRetries, Duration.Inf means no window
  * @param decider mapping from Throwable to [[akka.actor.SupervisorStrategy.Directive]], you can also use a
- *   `Seq` of Throwables which maps the given Throwables to restarts, otherwise escalates.
+ *   [[scala.collection.immutable.Seq]] of Throwables which maps the given Throwables to restarts, otherwise escalates.
  * @param loggingEnabled the strategy logs the failure if this is enabled (true), by default it is enabled
  */
 case class OneForOneStrategy(
-  maxNrOfRetries: Int = -1,
-  withinTimeRange: Duration = Duration.Inf,
-  override val loggingEnabled: Boolean = true)(val decider: SupervisorStrategy.Decider)
+  maxNrOfRetries:              Int      = -1,
+  withinTimeRange:             Duration = Duration.Inf,
+  override val loggingEnabled: Boolean  = true)(val decider: SupervisorStrategy.Decider)
   extends SupervisorStrategy {
 
+  /**
+   * Java API
+   */
   def this(maxNrOfRetries: Int, withinTimeRange: Duration, decider: SupervisorStrategy.JDecider, loggingEnabled: Boolean) =
     this(maxNrOfRetries, withinTimeRange, loggingEnabled)(SupervisorStrategy.makeDecider(decider))
 
+  /**
+   *  Java API
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, decider: SupervisorStrategy.JDecider, loggingEnabled: Boolean) =
+    this(maxNrOfRetries, withinTimeRange.asScala, loggingEnabled)(SupervisorStrategy.makeDecider(decider))
+
+  /**
+   * Java API
+   */
   def this(maxNrOfRetries: Int, withinTimeRange: Duration, decider: SupervisorStrategy.JDecider) =
     this(maxNrOfRetries, withinTimeRange)(SupervisorStrategy.makeDecider(decider))
 
+  /**
+   * Java API
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, decider: SupervisorStrategy.JDecider) =
+    this(maxNrOfRetries, withinTimeRange.asScala)(SupervisorStrategy.makeDecider(decider))
+
+  /**
+   * Java API
+   */
   def this(maxNrOfRetries: Int, withinTimeRange: Duration, trapExit: JIterable[Class[_ <: Throwable]]) =
     this(maxNrOfRetries, withinTimeRange)(SupervisorStrategy.makeDecider(trapExit))
+
+  /**
+   * Java API
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, trapExit: JIterable[Class[_ <: Throwable]]) =
+    this(maxNrOfRetries, withinTimeRange.asScala)(SupervisorStrategy.makeDecider(trapExit))
+
+  /**
+   * Java API: compatible with lambda expressions
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: Duration, decider: SupervisorStrategy.Decider) =
+    this(maxNrOfRetries = maxNrOfRetries, withinTimeRange = withinTimeRange)(decider)
+
+  /**
+   * Java API: compatible with lambda expressions
+   */
+  def this(maxNrOfRetries: Int, withinTimeRange: java.time.Duration, decider: SupervisorStrategy.Decider) =
+    this(maxNrOfRetries = maxNrOfRetries, withinTimeRange = withinTimeRange.asScala)(decider)
+
+  def this(loggingEnabled: Boolean, decider: SupervisorStrategy.Decider) =
+    this(loggingEnabled = loggingEnabled)(decider)
+
+  /**
+   * Java API: compatible with lambda expressions
+   */
+  def this(decider: SupervisorStrategy.Decider) =
+    this()(decider)
+
+  def withMaxNrOfRetries(maxNrOfRetries: Int): OneForOneStrategy = copy(maxNrOfRetries = maxNrOfRetries)(decider)
 
   /*
    *  this is a performance optimization to avoid re-allocating the pairs upon
@@ -450,4 +567,3 @@ case class OneForOneStrategy(
       context.stop(child) //TODO optimization to drop child here already?
   }
 }
-

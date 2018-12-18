@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2018 Lightbend Inc. <https://www.lightbend.com>
+ */
+
 package akka.actor.dispatch
 
 import java.util.concurrent.CountDownLatch
@@ -7,7 +11,6 @@ import akka.testkit.AkkaSpec
 /**
  * Tests the behavior of the executor based event driven dispatcher when multiple actors are being dispatched on it.
  */
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class DispatcherActorsSpec extends AkkaSpec {
   class SlowActor(finishedCounter: CountDownLatch) extends Actor {
 
@@ -48,7 +51,7 @@ class DispatcherActorsSpec extends AkkaSpec {
       fFinished.await
       assert(sFinished.getCount > 0)
       sFinished.await
-      assert(sFinished.getCount === 0)
+      assert(sFinished.getCount === 0L)
       system.stop(f)
       system.stop(s)
     }

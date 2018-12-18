@@ -1,29 +1,24 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
-import scala.collection.immutable.SortedSet
-import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
-import scala.concurrent.duration._
 import akka.actor.Props
 import akka.actor.Actor
 import akka.cluster.MemberStatus._
+import akka.actor.Deploy
 
 object NodeLeavingAndExitingMultiJvmSpec extends MultiNodeConfig {
   val first = role("first")
   val second = role("second")
   val third = role("third")
 
-  commonConfig(
-    debugConfig(on = false)
-      .withFallback(ConfigFactory.parseString("""
-          # turn off unreachable reaper
-          akka.cluster.unreachable-nodes-reaper-interval = 300 s""")
-        .withFallback(MultiNodeClusterSpec.clusterConfigWithFailureDetectorPuppet)))
+  commonConfig(debugConfig(on = false).
+    withFallback(MultiNodeClusterSpec.clusterConfigWithFailureDetectorPuppet))
 }
 
 class NodeLeavingAndExitingMultiJvmNode1 extends NodeLeavingAndExitingSpec
@@ -52,10 +47,10 @@ abstract class NodeLeavingAndExitingSpec
               if (state.members.exists(m ⇒ m.address == secondAddess && m.status == Exiting))
                 exitingLatch.countDown()
             case MemberExited(m) if m.address == secondAddess ⇒ exitingLatch.countDown()
-            case MemberRemoved(m)                             ⇒ // not tested here
+            case _: MemberRemoved                             ⇒ // not tested here
 
           }
-        })), classOf[MemberEvent])
+        }).withDeploy(Deploy.local)), classOf[MemberEvent])
         enterBarrier("registered-listener")
 
         runOn(third) {
@@ -63,12 +58,8 @@ abstract class NodeLeavingAndExitingSpec
         }
         enterBarrier("second-left")
 
-        val expectedAddresses = roles.toSet map address
-        awaitAssert(clusterView.members.map(_.address) must be(expectedAddresses))
-
         // Verify that 'second' node is set to EXITING
         exitingLatch.await
-
       }
 
       // node that is leaving

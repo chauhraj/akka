@@ -1,8 +1,10 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
+import akka.actor.Address
 import com.typesafe.config.ConfigFactory
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
@@ -10,20 +12,18 @@ import akka.testkit._
 import scala.concurrent.duration._
 import scala.collection.immutable
 
-case class SingletonClusterMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
+final case class SingletonClusterMultiNodeConfig(failureDetectorPuppet: Boolean) extends MultiNodeConfig {
   val first = role("first")
   val second = role("second")
 
   commonConfig(debugConfig(on = false).
     withFallback(ConfigFactory.parseString("""
       akka.cluster {
-        auto-down                  = on
+        auto-down-unreachable-after = 0s
         failure-detector.threshold = 4
       }
     """)).
     withFallback(MultiNodeClusterSpec.clusterConfig(failureDetectorPuppet)))
-
-  nodeConfig(first)(ConfigFactory.parseString("akka.cluster.auto-join = on"))
 
 }
 
@@ -45,10 +45,12 @@ abstract class SingletonClusterSpec(multiNodeConfig: SingletonClusterMultiNodeCo
 
   "A cluster of 2 nodes" must {
 
-    "become singleton cluster when started with 'auto-join=on' and 'seed-nodes=[]'" taggedAs LongRunningTest in {
+    "become singleton cluster when started with seed-nodes" taggedAs LongRunningTest in {
       runOn(first) {
+        val nodes: immutable.IndexedSeq[Address] = Vector(first) //
+        cluster.joinSeedNodes(nodes)
         awaitMembersUp(1)
-        clusterView.isSingletonCluster must be(true)
+        clusterView.isSingletonCluster should ===(true)
       }
 
       enterBarrier("after-1")
@@ -56,7 +58,7 @@ abstract class SingletonClusterSpec(multiNodeConfig: SingletonClusterMultiNodeCo
 
     "not be singleton cluster when joined with other node" taggedAs LongRunningTest in {
       awaitClusterUp(first, second)
-      clusterView.isSingletonCluster must be(false)
+      clusterView.isSingletonCluster should ===(false)
       assertLeader(first, second)
 
       enterBarrier("after-2")
@@ -65,16 +67,24 @@ abstract class SingletonClusterSpec(multiNodeConfig: SingletonClusterMultiNodeCo
     "become singleton cluster when one node is shutdown" taggedAs LongRunningTest in {
       runOn(first) {
         val secondAddress = address(second)
-        testConductor.shutdown(second, 0).await
+        testConductor.exit(second, 0).await
 
         markNodeAsUnavailable(secondAddress)
 
         awaitMembersUp(numberOfMembers = 1, canNotBePartOfMemberRing = Set(secondAddress), 30.seconds)
-        clusterView.isSingletonCluster must be(true)
+        clusterView.isSingletonCluster should ===(true)
         awaitCond(clusterView.isLeader)
       }
 
       enterBarrier("after-3")
+    }
+
+    "leave and shutdown itself when singleton cluster" taggedAs LongRunningTest in {
+      runOn(first) {
+        cluster.leave(first)
+        awaitCond(cluster.isTerminated, 5.seconds)
+      }
+      enterBarrier("after-4")
     }
   }
 }

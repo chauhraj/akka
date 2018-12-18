@@ -1,16 +1,15 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.testkit
 
 import akka.actor._
-import scala.concurrent.duration.Duration
-import akka.dispatch.DispatcherPrerequisites
 import scala.concurrent.duration.FiniteDuration
+import scala.reflect.ClassTag
 
 /**
- * This is a specialised form of the TestActorRef with support for querying and
+ * This is a specialized form of the TestActorRef with support for querying and
  * setting the state of a FSM. Use a LoggingFSM with this class if you also
  * need to inspect event traces.
  *
@@ -19,12 +18,12 @@ import scala.concurrent.duration.FiniteDuration
  *     override def logDepth = 12
  *     startWith(1, null)
  *     when(1) {
- *       case Ev("hello") =&gt; goto(2)
+ *       case Event("hello", _) =&gt; goto(2)
  *     }
  *     when(2) {
- *       case Ev("world") =&gt; goto(1)
+ *       case Event("world", _) =&gt; goto(1)
  *     }
- *   }
+ *   })
  * assert (fsm.stateName == 1)
  * fsm ! "hallo"
  * assert (fsm.stateName == 2)
@@ -34,12 +33,11 @@ import scala.concurrent.duration.FiniteDuration
  * @since 1.2
  */
 class TestFSMRef[S, D, T <: Actor](
-  system: ActorSystem,
-  _prerequisites: DispatcherPrerequisites,
-  props: Props,
+  system:     ActorSystem,
+  props:      Props,
   supervisor: ActorRef,
-  name: String)(implicit ev: T <:< FSM[S, D])
-  extends TestActorRef(system, _prerequisites, props, supervisor, name) {
+  name:       String)(implicit ev: T <:< FSM[S, D])
+  extends TestActorRef[T](system, props, supervisor, name) {
 
   private def fsm: T = underlyingActor
 
@@ -59,45 +57,52 @@ class TestFSMRef[S, D, T <: Actor](
    * corresponding transition initiated from within the FSM, including timeout
    * and stop handling.
    */
-  def setState(stateName: S = fsm.stateName, stateData: D = fsm.stateData, timeout: FiniteDuration = null, stopReason: Option[FSM.Reason] = None) {
+  def setState(stateName: S = fsm.stateName, stateData: D = fsm.stateData, timeout: FiniteDuration = null, stopReason: Option[FSM.Reason] = None): Unit = {
     fsm.applyState(FSM.State(stateName, stateData, Option(timeout), stopReason))
   }
 
   /**
-   * Proxy for FSM.setTimer.
+   * Proxy for [[akka.actor.FSM#setTimer]].
    */
-  def setTimer(name: String, msg: Any, timeout: FiniteDuration, repeat: Boolean) {
+  def setTimer(name: String, msg: Any, timeout: FiniteDuration, repeat: Boolean = false): Unit = {
     fsm.setTimer(name, msg, timeout, repeat)
   }
 
   /**
-   * Proxy for FSM.cancelTimer.
+   * Proxy for [[akka.actor.FSM#cancelTimer]].
    */
-  def cancelTimer(name: String) { fsm.cancelTimer(name) }
-
-  @deprecated("Use isTimerActive", "2.2")
-  def timerActive_?(name: String): Boolean = isTimerActive(name)
+  def cancelTimer(name: String): Unit = { fsm.cancelTimer(name) }
 
   /**
-   * Proxy for FSM.isTimerActive.
+   * Proxy for [[akka.actor.FSM#isStateTimerActive]].
    */
   def isTimerActive(name: String) = fsm.isTimerActive(name)
 
   /**
-   * Proxy for FSM.timerActive_?.
+   * Proxy for [[akka.actor.FSM#isStateTimerActive]].
    */
   def isStateTimerActive = fsm.isStateTimerActive
 }
 
 object TestFSMRef {
 
-  def apply[S, D, T <: Actor](factory: ⇒ T)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
-    val impl = system.asInstanceOf[ActorSystemImpl] //TODO ticket #1559
-    new TestFSMRef(impl, system.dispatchers.prerequisites, Props(creator = () ⇒ factory), impl.guardian.asInstanceOf[InternalActorRef], TestActorRef.randomName)
+  def apply[S, D, T <: Actor: ClassTag](factory: ⇒ T)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl]
+    new TestFSMRef(impl, Props(factory), impl.guardian.asInstanceOf[InternalActorRef], TestActorRef.randomName)
   }
 
-  def apply[S, D, T <: Actor](factory: ⇒ T, name: String)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
-    val impl = system.asInstanceOf[ActorSystemImpl] //TODO ticket #1559
-    new TestFSMRef(impl, system.dispatchers.prerequisites, Props(creator = () ⇒ factory), impl.guardian.asInstanceOf[InternalActorRef], name)
+  def apply[S, D, T <: Actor: ClassTag](factory: ⇒ T, name: String)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl]
+    new TestFSMRef(impl, Props(factory), impl.guardian.asInstanceOf[InternalActorRef], name)
+  }
+
+  def apply[S, D, T <: Actor: ClassTag](factory: ⇒ T, supervisor: ActorRef, name: String)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl]
+    new TestFSMRef(impl, Props(factory), supervisor.asInstanceOf[InternalActorRef], name)
+  }
+
+  def apply[S, D, T <: Actor: ClassTag](factory: ⇒ T, supervisor: ActorRef)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl]
+    new TestFSMRef(impl, Props(factory), supervisor.asInstanceOf[InternalActorRef], TestActorRef.randomName)
   }
 }

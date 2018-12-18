@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.actor.dsl
@@ -21,30 +21,40 @@ import akka.pattern.ask
 import akka.actor.ActorDSL
 import akka.actor.Props
 
-trait Inbox { this: ActorDSL.type ⇒
-
-  protected trait InboxExtension { this: Extension ⇒
-    val DSLInboxQueueSize = config.getInt("inbox-size")
-
-    val inboxNr = new AtomicInteger
-    val inboxProps = Props(new InboxActor(DSLInboxQueueSize))
-
-    def newReceiver: ActorRef = mkChild(inboxProps, "inbox-" + inboxNr.incrementAndGet)
-  }
+/**
+ * INTERNAL API
+ */
+private[akka] object Inbox {
 
   private sealed trait Query {
     def deadline: Deadline
     def withClient(c: ActorRef): Query
     def client: ActorRef
   }
-  private case class Get(deadline: Deadline, client: ActorRef = null) extends Query {
+  private final case class Get(deadline: Deadline, client: ActorRef = null) extends Query {
     def withClient(c: ActorRef) = copy(client = c)
   }
-  private case class Select(deadline: Deadline, predicate: PartialFunction[Any, Any], client: ActorRef = null) extends Query {
+  private final case class Select(deadline: Deadline, predicate: PartialFunction[Any, Any], client: ActorRef = null) extends Query {
     def withClient(c: ActorRef) = copy(client = c)
   }
-  private case class StartWatch(target: ActorRef)
+  private final case class StartWatch(target: ActorRef)
   private case object Kick
+
+}
+
+trait Inbox { this: ActorDSL.type ⇒
+
+  import Inbox._
+
+  protected trait InboxExtension { this: Extension ⇒
+    val DSLInboxQueueSize = config.getInt("inbox-size")
+
+    val inboxNr = new AtomicInteger
+    val inboxProps = Props(classOf[InboxActor], ActorDSL, DSLInboxQueueSize)
+
+    def newReceiver: ActorRef = mkChild(inboxProps, "inbox-" + inboxNr.incrementAndGet)
+  }
+
   private implicit val deadlineOrder: Ordering[Query] = new Ordering[Query] {
     def compare(left: Query, right: Query): Int = left.deadline.time compare right.deadline.time
   }
@@ -55,13 +65,13 @@ trait Inbox { this: ActorDSL.type ⇒
     var clientsByTimeout = TreeSet.empty[Query]
     var printedWarning = false
 
-    def enqueueQuery(q: Query) {
-      val query = q withClient sender
+    def enqueueQuery(q: Query): Unit = {
+      val query = q withClient sender()
       clients enqueue query
       clientsByTimeout += query
     }
 
-    def enqueueMessage(msg: Any) {
+    def enqueueMessage(msg: Any): Unit = {
       if (messages.size < size) messages enqueue msg
       else {
         if (!printedWarning) {
@@ -86,13 +96,13 @@ trait Inbox { this: ActorDSL.type ⇒
     def receive = ({
       case g: Get ⇒
         if (messages.isEmpty) enqueueQuery(g)
-        else sender ! messages.dequeue()
+        else sender() ! messages.dequeue()
       case s @ Select(_, predicate, _) ⇒
         if (messages.isEmpty) enqueueQuery(s)
         else {
           currentSelect = s
           messages.dequeueFirst(messagePredicate) match {
-            case Some(msg) ⇒ sender ! msg
+            case Some(msg) ⇒ sender() ! msg
             case None      ⇒ enqueueQuery(s)
           }
           currentSelect = null
@@ -106,8 +116,7 @@ trait Inbox { this: ActorDSL.type ⇒
           val toKick = overdue.next()
           toKick.client ! Status.Failure(new TimeoutException("deadline passed"))
         }
-        // TODO: this wants to lose the `Queue.empty ++=` part when SI-6208 is fixed
-        clients = Queue.empty ++= clients.filterNot(pred)
+        clients = clients.filterNot(pred)
         clientsByTimeout = clientsByTimeout.from(Get(now))
       case msg ⇒
         if (clients.isEmpty) enqueueMessage(msg)
@@ -130,7 +139,8 @@ trait Inbox { this: ActorDSL.type ⇒
         import context.dispatcher
         if (currentDeadline.isEmpty) {
           currentDeadline = Some((next, context.system.scheduler.scheduleOnce(next.timeLeft, self, Kick)))
-        } else if (currentDeadline.get._1 != next) {
+        } else {
+          // must not rely on the Scheduler to not fire early (for robustness)
           currentDeadline.get._2.cancel()
           currentDeadline = Some((next, context.system.scheduler.scheduleOnce(next.timeLeft, self, Kick)))
         }
@@ -146,8 +156,8 @@ trait Inbox { this: ActorDSL.type ⇒
 
   /**
    * Create a new actor which will internally queue up messages it gets so that
-   * they can be interrogated with the [[akka.actor.dsl.Inbox!.Inbox!.receive]]
-   * and [[akka.actor.dsl.Inbox!.Inbox!.select]] methods. It will be created as
+   * they can be interrogated with the `akka.actor.dsl.Inbox!.Inbox!.receive`
+   * and `akka.actor.dsl.Inbox!.Inbox!.select` methods. It will be created as
    * a system actor in the ActorSystem which is implicitly (or explicitly)
    * supplied.
    */
@@ -205,7 +215,7 @@ trait Inbox { this: ActorDSL.type ⇒
      * Overridden finalizer which will try to stop the actor once this Inbox
      * is no longer referenced.
      */
-    override def finalize() {
+    override def finalize(): Unit = {
       system.stop(receiver)
     }
   }

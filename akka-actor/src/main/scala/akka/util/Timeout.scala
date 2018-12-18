@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.util
@@ -7,12 +7,14 @@ package akka.util
 import language.implicitConversions
 
 import java.util.concurrent.TimeUnit
-import java.lang.{ Double ⇒ JDouble }
 import scala.concurrent.duration.{ Duration, FiniteDuration }
 
 @SerialVersionUID(1L)
 case class Timeout(duration: FiniteDuration) {
-  def this(timeout: Long) = this(Duration(timeout, TimeUnit.MILLISECONDS))
+
+  /**
+   * Construct a Timeout from the given time unit and factor.
+   */
   def this(length: Long, unit: TimeUnit) = this(Duration(length, unit))
 }
 
@@ -26,10 +28,18 @@ object Timeout {
    */
   val zero: Timeout = new Timeout(Duration.Zero)
 
-  def apply(timeout: Long): Timeout = new Timeout(timeout)
+  /**
+   * Construct a Timeout from the given time unit and factor.
+   */
   def apply(length: Long, unit: TimeUnit): Timeout = new Timeout(length, unit)
 
+  /**
+   * Create a Timeout from java.time.Duration.
+   */
+  def create(duration: java.time.Duration): Timeout = {
+    import JavaDurationConverters._
+    new Timeout(duration.asScala)
+  }
+
   implicit def durationToTimeout(duration: FiniteDuration): Timeout = new Timeout(duration)
-  implicit def intToTimeout(timeout: Int): Timeout = new Timeout(timeout)
-  implicit def longToTimeout(timeout: Long): Timeout = new Timeout(timeout)
 }

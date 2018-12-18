@@ -1,13 +1,13 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.testkit
 
-import language.reflectiveCalls
 import language.postfixOps
 
 import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.Matchers
 import akka.actor._
 import com.typesafe.config.ConfigFactory
 import scala.concurrent.Await
@@ -15,8 +15,7 @@ import scala.concurrent.duration._
 import akka.actor.DeadLetter
 import akka.pattern.ask
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class AkkaSpecSpec extends WordSpec with MustMatchers {
+class AkkaSpecSpec extends WordSpec with Matchers {
 
   "An AkkaSpec" must {
 
@@ -28,7 +27,7 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
           a ! 42
         }
       } finally {
-        system.shutdown()
+        TestKit.shutdownActorSystem(system)
       }
     }
 
@@ -36,20 +35,19 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
       // verbose config just for demonstration purposes, please leave in in case of debugging
       import scala.collection.JavaConverters._
       val conf = Map(
-        "akka.actor.debug.lifecycle" -> true, "akka.actor.debug.event-stream" -> true,
-        "akka.loglevel" -> "DEBUG", "akka.stdout-loglevel" -> "DEBUG")
+        "akka.actor.debug.lifecycle" → true, "akka.actor.debug.event-stream" → true,
+        "akka.loglevel" → "DEBUG", "akka.stdout-loglevel" → "DEBUG")
       val system = ActorSystem("AkkaSpec1", ConfigFactory.parseMap(conf.asJava).withFallback(AkkaSpec.testConf))
-      val spec = new AkkaSpec(system) {
-        val ref = Seq(testActor, system.actorOf(Props.empty, "name"))
-      }
-      spec.ref foreach (_.isTerminated must not be true)
-      system.shutdown()
-      spec.awaitCond(spec.ref forall (_.isTerminated), 2 seconds)
+      var refs = Seq.empty[ActorRef]
+      val spec = new AkkaSpec(system) { refs = Seq(testActor, system.actorOf(Props.empty, "name")) }
+      refs foreach (_.isTerminated should not be true)
+      TestKit.shutdownActorSystem(system)
+      spec.awaitCond(refs forall (_.isTerminated), 2 seconds)
     }
 
-    "must stop correctly when sending PoisonPill to rootGuardian" in {
+    "stop correctly when sending PoisonPill to rootGuardian" in {
       val system = ActorSystem("AkkaSpec2", AkkaSpec.testConf)
-      val spec = new AkkaSpec(system) {}
+      new AkkaSpec(system) {}
       val latch = new TestLatch(1)(system)
       system.registerOnTermination(latch.countDown())
 
@@ -58,23 +56,23 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
       Await.ready(latch, 2 seconds)
     }
 
-    "must enqueue unread messages from testActor to deadLetters" in {
+    "enqueue unread messages from testActor to deadLetters" in {
       val system, otherSystem = ActorSystem("AkkaSpec3", AkkaSpec.testConf)
 
       try {
         var locker = Seq.empty[DeadLetter]
         implicit val timeout = TestKitExtension(system).DefaultTimeout
-        implicit val davyJones = otherSystem.actorOf(Props(new Actor {
+        val davyJones = otherSystem.actorOf(Props(new Actor {
           def receive = {
             case m: DeadLetter ⇒ locker :+= m
-            case "Die!"        ⇒ sender ! "finally gone"; context.stop(self)
+            case "Die!"        ⇒ sender() ! "finally gone"; context.stop(self)
           }
         }), "davyJones")
 
         system.eventStream.subscribe(davyJones, classOf[DeadLetter])
 
         val probe = new TestProbe(system)
-        probe.ref ! 42
+        probe.ref.tell(42, davyJones)
         /*
        * this will ensure that the message is actually received, otherwise it
        * may happen that the system.stop() suspends the testActor before it had
@@ -86,15 +84,15 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
 
         val latch = new TestLatch(1)(system)
         system.registerOnTermination(latch.countDown())
-        system.shutdown()
+        TestKit.shutdownActorSystem(system)
         Await.ready(latch, 2 seconds)
-        Await.result(davyJones ? "Die!", timeout.duration) must be === "finally gone"
+        Await.result(davyJones ? "Die!", timeout.duration) should ===("finally gone")
 
         // this will typically also contain log messages which were sent after the logger shutdown
-        locker must contain(DeadLetter(42, davyJones, probe.ref))
+        locker should contain(DeadLetter(42, davyJones, probe.ref))
       } finally {
-        system.shutdown()
-        otherSystem.shutdown()
+        TestKit.shutdownActorSystem(system)
+        TestKit.shutdownActorSystem(otherSystem)
       }
     }
   }

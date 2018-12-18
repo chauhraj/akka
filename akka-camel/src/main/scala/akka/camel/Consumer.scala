@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.camel
@@ -12,9 +12,8 @@ import akka.dispatch.Mapper
 
 /**
  * Mixed in by Actor implementations that consume message from Camel endpoints.
- *
- *
  */
+@deprecated("Akka Camel is deprecated in favour of 'Alpakka', the Akka Streams based collection of integrations to various endpoints (including Camel).", since = "2.5.0")
 trait Consumer extends Actor with CamelSupport {
   import Consumer._
   /**
@@ -26,16 +25,16 @@ trait Consumer extends Actor with CamelSupport {
    * Registers the consumer endpoint. Note: when overriding this method, be sure to
    * call 'super.preRestart', otherwise the consumer endpoint will not be registered.
    */
-  override def preStart() {
+  override def preStart(): Unit = {
     super.preStart()
     // Possible FIXME. registering the endpoint here because of problems
     // with order of execution of trait body in the Java version (UntypedConsumerActor)
-    // where getEndpointUri is called before its constructor (where a uri is set to return from getEndpointUri) 
+    // where getEndpointUri is called before its constructor (where a uri is set to return from getEndpointUri)
     // and remains null. CustomRouteTest provides a test to verify this.
     register()
   }
 
-  private[this] def register() {
+  private[this] def register(): Unit = {
     camel.supervisor ! Register(self, endpointUri, Some(ConsumerConfig(activationTimeout, replyTimeout, autoAck, onRouteDefinition)))
   }
 
@@ -87,8 +86,17 @@ private[camel] object Consumer {
     override def checkedApply(rd: RouteDefinition): ProcessorDefinition[_] = rd
   }
 }
+
 /**
- * For internal use only.
+ * INTERNAL API
  * Captures the configuration of the Consumer.
+ *
+ * Was a case class but has been split up as a workaround for SI-8283
  */
-private[camel] case class ConsumerConfig(activationTimeout: FiniteDuration, replyTimeout: FiniteDuration, autoAck: Boolean, onRouteDefinition: RouteDefinition ⇒ ProcessorDefinition[_]) extends NoSerializationVerificationNeeded
+private[camel] class ConsumerConfig(val activationTimeout: FiniteDuration, val replyTimeout: FiniteDuration, val autoAck: Boolean, val onRouteDefinition: RouteDefinition ⇒ ProcessorDefinition[_]) extends NoSerializationVerificationNeeded
+  with scala.Serializable
+
+private[camel] object ConsumerConfig {
+  def apply(activationTimeout: FiniteDuration, replyTimeout: FiniteDuration, autoAck: Boolean, onRouteDefinition: RouteDefinition ⇒ ProcessorDefinition[_]): ConsumerConfig =
+    new ConsumerConfig(activationTimeout, replyTimeout, autoAck, onRouteDefinition)
+}

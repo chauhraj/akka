@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.routing
@@ -37,8 +37,12 @@ class ConsistentHash[T: ClassTag] private (nodes: immutable.SortedMap[Int, T], v
    * Note that the instance is immutable and this
    * operation returns a new instance.
    */
-  def :+(node: T): ConsistentHash[T] =
-    new ConsistentHash(nodes ++ ((1 to virtualNodesFactor) map { r ⇒ (nodeHashFor(node, r) -> node) }), virtualNodesFactor)
+  def :+(node: T): ConsistentHash[T] = {
+    val nodeHash = hashFor(node.toString)
+    new ConsistentHash(
+      nodes ++ ((1 to virtualNodesFactor) map { r ⇒ (concatenateNodeHash(nodeHash, r) → node) }),
+      virtualNodesFactor)
+  }
 
   /**
    * Java API: Adds a node to the node ring.
@@ -52,8 +56,12 @@ class ConsistentHash[T: ClassTag] private (nodes: immutable.SortedMap[Int, T], v
    * Note that the instance is immutable and this
    * operation returns a new instance.
    */
-  def :-(node: T): ConsistentHash[T] =
-    new ConsistentHash(nodes -- ((1 to virtualNodesFactor) map { r ⇒ nodeHashFor(node, r) }), virtualNodesFactor)
+  def :-(node: T): ConsistentHash[T] = {
+    val nodeHash = hashFor(node.toString)
+    new ConsistentHash(
+      nodes -- ((1 to virtualNodesFactor) map { r ⇒ concatenateNodeHash(nodeHash, r) }),
+      virtualNodesFactor)
+  }
 
   /**
    * Java API: Removes a node from the node ring.
@@ -104,8 +112,13 @@ class ConsistentHash[T: ClassTag] private (nodes: immutable.SortedMap[Int, T], v
 
 object ConsistentHash {
   def apply[T: ClassTag](nodes: Iterable[T], virtualNodesFactor: Int): ConsistentHash[T] = {
-    new ConsistentHash(immutable.SortedMap.empty[Int, T] ++
-      (for (node ← nodes; vnode ← 1 to virtualNodesFactor) yield (nodeHashFor(node, vnode) -> node)),
+    new ConsistentHash(
+      immutable.SortedMap.empty[Int, T] ++
+        (for {
+          node ← nodes
+          nodeHash = hashFor(node.toString)
+          vnode ← 1 to virtualNodesFactor
+        } yield (concatenateNodeHash(nodeHash, vnode) → node)),
       virtualNodesFactor)
   }
 
@@ -117,9 +130,11 @@ object ConsistentHash {
     apply(nodes.asScala, virtualNodesFactor)(ClassTag(classOf[Any].asInstanceOf[Class[T]]))
   }
 
-  private def nodeHashFor(node: Any, vnode: Int): Int = {
-    val baseStr = node.toString + ":"
-    hashFor(baseStr + vnode)
+  private def concatenateNodeHash(nodeHash: Int, vnode: Int): Int = {
+    import MurmurHash._
+    var h = startHash(nodeHash)
+    h = extendHash(h, vnode, startMagicA, startMagicB)
+    finalizeHash(h)
   }
 
   private def hashFor(bytes: Array[Byte]): Int = MurmurHash.arrayHash(bytes)

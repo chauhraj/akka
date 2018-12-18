@@ -1,29 +1,21 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import language.postfixOps
+import scala.concurrent.Await
 import scala.concurrent.duration._
-import com.typesafe.config.ConfigFactory
-import org.scalatest.BeforeAndAfter
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
 import akka.testkit._
 import akka.testkit.TestEvent._
-import akka.actor.Props
-import akka.actor.Actor
-import akka.actor.Address
-import akka.actor.RootActorPath
-import akka.actor.Terminated
-import akka.actor.Address
+import akka.actor._
 import akka.remote.RemoteActorRef
 import java.util.concurrent.TimeoutException
-import akka.actor.ActorSystemImpl
-import akka.actor.ActorIdentity
-import akka.actor.Identify
-import akka.actor.ActorRef
 import akka.remote.RemoteWatcher
+import akka.cluster.MultiNodeClusterSpec.EndActor
 
 object ClusterDeathWatchMultiJvmSpec extends MultiNodeConfig {
   val first = role("first")
@@ -39,6 +31,7 @@ object ClusterDeathWatchMultiJvmSpec extends MultiNodeConfig {
   class Hello extends Actor {
     def receive = Actor.emptyBehavior
   }
+
 }
 
 class ClusterDeathWatchMultiJvmNode1 extends ClusterDeathWatchSpec
@@ -67,7 +60,8 @@ abstract class ClusterDeathWatchSpec
   }
 
   "An actor watching a remote actor in the cluster" must {
-    "receive Terminated when watched node becomes Down" taggedAs LongRunningTest in within(20 seconds) {
+
+    "receive Terminated when watched node becomes Down/Removed" in within(20 seconds) {
       awaitClusterUp(first, second, third, fourth)
       enterBarrier("cluster-up")
 
@@ -90,39 +84,44 @@ abstract class ClusterDeathWatchSpec
               watchEstablished.countDown
             case Terminated(actor) ⇒ testActor ! actor.path
           }
-        }), name = "observer1")
+        }).withDeploy(Deploy.local), name = "observer1")
 
         watchEstablished.await
         enterBarrier("watch-established")
         expectMsg(path2)
-        expectNoMsg(2 seconds)
+        expectNoMessage(2.seconds)
         enterBarrier("second-terminated")
+        awaitAssert(clusterView.members.map(_.address) should not contain address(second))
 
         markNodeAsUnavailable(third)
-        awaitAssert(clusterView.members.map(_.address) must not contain (address(third)))
-        awaitAssert(clusterView.unreachableMembers.map(_.address) must contain(address(third)))
+        awaitAssert(clusterView.unreachableMembers.map(_.address) should contain(address(third)))
         cluster.down(third)
         // removed
-        awaitAssert(clusterView.unreachableMembers.map(_.address) must not contain (address(third)))
+        awaitAssert(clusterView.members.map(_.address) should not contain address(third))
+        awaitAssert(clusterView.unreachableMembers.map(_.address) should not contain address(third))
         expectMsg(path3)
         enterBarrier("third-terminated")
 
       }
 
       runOn(second, third, fourth) {
-        system.actorOf(Props(new Actor { def receive = Actor.emptyBehavior }), name = "subject")
+        system.actorOf(Props(new Actor { def receive = Actor.emptyBehavior }).withDeploy(Deploy.local), name = "subject")
         enterBarrier("subjected-started")
         enterBarrier("watch-established")
         runOn(third) {
           markNodeAsUnavailable(second)
-          awaitAssert(clusterView.members.map(_.address) must not contain (address(second)))
-          awaitAssert(clusterView.unreachableMembers.map(_.address) must contain(address(second)))
+          awaitAssert(clusterView.unreachableMembers.map(_.address) should contain(address(second)))
           cluster.down(second)
           // removed
-          awaitAssert(clusterView.unreachableMembers.map(_.address) must not contain (address(second)))
+          awaitAssert(clusterView.members.map(_.address) should not contain address(second))
+          awaitAssert(clusterView.unreachableMembers.map(_.address) should not contain address(second))
         }
         enterBarrier("second-terminated")
         enterBarrier("third-terminated")
+        runOn(fourth) {
+          awaitAssert(clusterView.members.map(_.address) should not contain address(second))
+          awaitAssert(clusterView.members.map(_.address) should not contain address(third))
+        }
       }
 
       runOn(fifth) {
@@ -136,7 +135,7 @@ abstract class ClusterDeathWatchSpec
 
     }
 
-    "receive Terminated when watched path doesn't exist" taggedAs LongRunningTest ignore {
+    "receive Terminated when watched path doesn't exist" ignore {
       Thread.sleep(5000)
       runOn(first) {
         val path = RootActorPath(second) / "user" / "non-existing"
@@ -145,7 +144,7 @@ abstract class ClusterDeathWatchSpec
           def receive = {
             case t: Terminated ⇒ testActor ! t.actor.path
           }
-        }), name = "observer3")
+        }).withDeploy(Deploy.local), name = "observer3")
 
         expectMsg(path)
       }
@@ -153,9 +152,9 @@ abstract class ClusterDeathWatchSpec
       enterBarrier("after-2")
     }
 
-    "be able to watch actor before node joins cluster, ClusterRemoteWatcher takes over from RemoteWatcher" taggedAs LongRunningTest in within(20 seconds) {
+    "be able to watch actor before node joins cluster, ClusterRemoteWatcher takes over from RemoteWatcher" in within(20 seconds) {
       runOn(fifth) {
-        system.actorOf(Props(new Actor { def receive = Actor.emptyBehavior }), name = "subject5")
+        system.actorOf(Props(new Actor { def receive = Actor.emptyBehavior }).withDeploy(Deploy.local), name = "subject5")
       }
       enterBarrier("subjected-started")
 
@@ -167,7 +166,9 @@ abstract class ClusterDeathWatchSpec
         // fifth is not cluster member, so the watch is handled by the RemoteWatcher
         awaitAssert {
           remoteWatcher ! RemoteWatcher.Stats
-          expectMsgType[RemoteWatcher.Stats].watchingRefs must contain((subject5, testActor))
+          val stats = expectMsgType[RemoteWatcher.Stats]
+          stats.watchingRefs should contain(subject5 → testActor)
+          stats.watchingAddresses should contain(address(fifth))
         }
       }
       enterBarrier("remote-watch")
@@ -176,13 +177,13 @@ abstract class ClusterDeathWatchSpec
       awaitClusterUp(first, fourth, fifth)
 
       runOn(first) {
-        // fifth is member, so the watch is handled by the ClusterRemoteWatcher,
-        // and cleaned up from RemoteWatcher
+        // fifth is member, so the node is handled by the ClusterRemoteWatcher,
+        // but the watch is still in RemoteWatcher
         awaitAssert {
           remoteWatcher ! RemoteWatcher.Stats
-          expectMsgType[RemoteWatcher.Stats].watchingRefs.map {
-            case (watchee, watcher) ⇒ watchee.path.name
-          } must not contain ("subject5")
+          val stats = expectMsgType[RemoteWatcher.Stats]
+          stats.watchingRefs.map(_._1.path.name) should contain("subject5")
+          stats.watchingAddresses should not contain address(fifth)
         }
       }
 
@@ -190,55 +191,79 @@ abstract class ClusterDeathWatchSpec
 
       runOn(fourth) {
         markNodeAsUnavailable(fifth)
-        awaitAssert(clusterView.members.map(_.address) must not contain (address(fifth)))
-        awaitAssert(clusterView.unreachableMembers.map(_.address) must contain(address(fifth)))
+        awaitAssert(clusterView.unreachableMembers.map(_.address) should contain(address(fifth)))
         cluster.down(fifth)
         // removed
-        awaitAssert(clusterView.unreachableMembers.map(_.address) must not contain (address(fifth)))
+        awaitAssert(clusterView.unreachableMembers.map(_.address) should not contain (address(fifth)))
+        awaitAssert(clusterView.members.map(_.address) should not contain (address(fifth)))
       }
 
       enterBarrier("fifth-terminated")
       runOn(first) {
-        expectMsgType[Terminated].actor.path.name must be("subject5")
+        expectMsgType[Terminated].actor.path.name should ===("subject5")
       }
 
       enterBarrier("after-3")
     }
 
-    "be able to shutdown system when using remote deployed actor on node that crash" taggedAs LongRunningTest in within(20 seconds) {
+    "be able to shutdown system when using remote deployed actor on node that crash" in within(20 seconds) {
+      // fourth actor system will be shutdown, not part of testConductor any more
+      // so we can't use barriers to synchronize with it
+      val firstAddress = address(first)
+      runOn(first) {
+        system.actorOf(Props(classOf[EndActor], testActor, None), "end")
+      }
+      enterBarrier("end-actor-created")
+
       runOn(fourth) {
         val hello = system.actorOf(Props[Hello], "hello")
-        hello.isInstanceOf[RemoteActorRef] must be(true)
-        hello.path.address must be(address(first))
+        hello.isInstanceOf[RemoteActorRef] should ===(true)
+        hello.path.address should ===(address(first))
         watch(hello)
         enterBarrier("hello-deployed")
 
         markNodeAsUnavailable(first)
-        awaitAssert(clusterView.members.map(_.address) must not contain (address(first)))
-        awaitAssert(clusterView.unreachableMembers.map(_.address) must contain(address(first)))
+        awaitAssert(clusterView.unreachableMembers.map(_.address) should contain(address(first)))
         cluster.down(first)
         // removed
-        awaitAssert(clusterView.unreachableMembers.map(_.address) must not contain (address(first)))
+        awaitAssert(clusterView.unreachableMembers.map(_.address) should not contain (address(first)))
+        awaitAssert(clusterView.members.map(_.address) should not contain (address(first)))
 
         expectTerminated(hello)
 
         enterBarrier("first-unavailable")
 
-        system.shutdown()
-        val timeout = remaining
-        try system.awaitTermination(timeout) catch {
+        val timeout = remainingOrDefault
+        try Await.ready(system.whenTerminated, timeout) catch {
           case _: TimeoutException ⇒
             fail("Failed to stop [%s] within [%s] \n%s".format(system.name, timeout,
               system.asInstanceOf[ActorSystemImpl].printTree))
         }
+
+        // signal to the first node that fourth is done
+        val endSystem = ActorSystem("EndSystem", system.settings.config)
+        try {
+          val endProbe = TestProbe()(endSystem)
+          val endActor = endSystem.actorOf(Props(classOf[EndActor], endProbe.ref, Some(firstAddress)), "end")
+          endActor ! EndActor.SendEnd
+          endProbe.expectMsg(EndActor.EndAck)
+
+        } finally {
+          shutdown(endSystem, 10 seconds)
+        }
+        // no barrier here, because it is not part of testConductor roles any more
+
       }
 
       runOn(first, second, third, fifth) {
         enterBarrier("hello-deployed")
         enterBarrier("first-unavailable")
+
+        // don't end the test until the fourth is done
         runOn(first) {
           // fourth system will be shutdown, remove to not participate in barriers any more
-          testConductor.removeNode(fourth)
+          testConductor.shutdown(fourth).await
+          expectMsg(EndActor.End)
         }
 
         enterBarrier("after-4")

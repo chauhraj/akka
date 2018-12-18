@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.osgi.test
 
 import akka.osgi.ActorSystemActivator
@@ -22,8 +23,8 @@ object TestActivators {
  */
 class PingPongActorSystemActivator extends ActorSystemActivator {
 
-  def configure(context: BundleContext, system: ActorSystem) {
-    system.actorOf(Props(new PongActor), name = "pong")
+  def configure(context: BundleContext, system: ActorSystem): Unit = {
+    system.actorOf(Props[PongActor], name = "pong")
     registerService(context, system)
   }
 
@@ -34,7 +35,7 @@ class PingPongActorSystemActivator extends ActorSystemActivator {
  */
 class RuntimeNameActorSystemActivator extends ActorSystemActivator {
 
-  def configure(context: BundleContext, system: ActorSystem) = registerService(context, system);
+  def configure(context: BundleContext, system: ActorSystem) = registerService(context, system)
 
   override def getActorSystemName(context: BundleContext) =
     TestActivators.ACTOR_SYSTEM_NAME_PATTERN.format(context.getBundle.getBundleId)

@@ -1,9 +1,8 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
-package akka
 
-import akka.actor._
+package akka
 
 /**
  * == Commonly Used Patterns With Akka ==
@@ -17,7 +16,9 @@ import akka.actor._
  * <li><b>ask:</b> create a temporary one-off actor for receiving a reply to a
  * message and complete a [[scala.concurrent.Future]] with it; returns said
  * Future.</li>
- * <li><b>pipeTo:</b> feed eventually computed value of a future to an actor as
+ * <li><b>pipeTo:</b> feed eventually computed value of a future to an [[akka.actor.ActorRef]] as
+ * a message.</li>
+ * <li><b>pipeToSelection:</b> feed eventually computed value of a future to an [[akka.actor.ActorSelection]] as
  * a message.</li>
  * </ul>
  *
@@ -38,6 +39,6 @@ import akka.actor._
  * ask(actor, message);
  * }}}
  */
-package object pattern extends PipeToSupport with AskSupport with GracefulStopSupport with FutureTimeoutSupport {
+package object pattern extends PipeToSupport with AskSupport with GracefulStopSupport with FutureTimeoutSupport
+  with RetrySupport
 
-}

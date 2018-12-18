@@ -1,25 +1,33 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.io
 
 import scala.annotation.tailrec
+import scala.collection.immutable
 import akka.testkit.{ AkkaSpec, TestProbe }
 import akka.actor.ActorRef
-import scala.collection.immutable
 import akka.io.Inet.SocketOption
+import akka.testkit.SocketUtil._
 import Tcp._
-import akka.TestUtils
-import TestUtils._
+import akka.actor.ActorSystem
+import akka.dispatch.ExecutionContexts
 
 trait TcpIntegrationSpecSupport { _: AkkaSpec ⇒
 
-  class TestSetup {
+  class TestSetup(shouldBindServer: Boolean = true, runClientInExtraSystem: Boolean = true) {
+    val clientSystem =
+      if (runClientInExtraSystem) {
+        val res = ActorSystem("TcpIntegrationSpec-client", system.settings.config)
+        // terminate clientSystem after server system
+        system.whenTerminated.onComplete { _ ⇒ res.terminate() }(ExecutionContexts.sameThreadExecutionContext)
+        res
+      } else system
     val bindHandler = TestProbe()
     val endpoint = temporaryServerAddress()
 
-    bindServer()
+    if (shouldBindServer) bindServer()
 
     def bindServer(): Unit = {
       val bindCommander = TestProbe()
@@ -28,17 +36,17 @@ trait TcpIntegrationSpecSupport { _: AkkaSpec ⇒
     }
 
     def establishNewClientConnection(): (TestProbe, ActorRef, TestProbe, ActorRef) = {
-      val connectCommander = TestProbe()
-      connectCommander.send(IO(Tcp), Connect(endpoint, options = connectOptions))
+      val connectCommander = TestProbe()(clientSystem)
+      connectCommander.send(IO(Tcp)(clientSystem), Connect(endpoint, options = connectOptions))
       val Connected(`endpoint`, localAddress) = connectCommander.expectMsgType[Connected]
-      val clientHandler = TestProbe()
-      connectCommander.sender ! Register(clientHandler.ref)
+      val clientHandler = TestProbe()(clientSystem)
+      connectCommander.sender() ! Register(clientHandler.ref)
 
       val Connected(`localAddress`, `endpoint`) = bindHandler.expectMsgType[Connected]
       val serverHandler = TestProbe()
-      bindHandler.sender ! Register(serverHandler.ref)
+      bindHandler.sender() ! Register(serverHandler.ref)
 
-      (clientHandler, connectCommander.sender, serverHandler, bindHandler.sender)
+      (clientHandler, connectCommander.sender(), serverHandler, bindHandler.sender())
     }
 
     @tailrec final def expectReceivedData(handler: TestProbe, remaining: Int): Unit =

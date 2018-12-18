@@ -1,8 +1,9 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor
 
-import org.scalatest.junit.JUnitSuite
+import org.scalatest.junit.JUnitSuiteLike
 
-class JavaAPISpec extends JavaAPI with JUnitSuite
+class JavaAPISpec extends JavaAPI with JUnitSuiteLike

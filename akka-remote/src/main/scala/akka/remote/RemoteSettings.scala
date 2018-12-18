@@ -1,102 +1,133 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.remote
 
 import com.typesafe.config.Config
 import scala.concurrent.duration._
-import java.util.concurrent.TimeUnit.MILLISECONDS
 import akka.util.Timeout
 import scala.collection.immutable
-import akka.util.Helpers.Requiring
+import akka.util.Helpers.{ ConfigOps, Requiring, toRootLowerCase }
 import akka.japi.Util._
+import akka.actor.Props
+import akka.event.Logging
+import akka.event.Logging.LogLevel
+import akka.ConfigurationException
+import akka.remote.artery.ArterySettings
 
-class RemoteSettings(val config: Config) {
+final class RemoteSettings(val config: Config) {
   import config._
   import scala.collection.JavaConverters._
+
+  val Artery = ArterySettings(getConfig("akka.remote.artery"))
 
   val LogReceive: Boolean = getBoolean("akka.remote.log-received-messages")
 
   val LogSend: Boolean = getBoolean("akka.remote.log-sent-messages")
 
+  val LogFrameSizeExceeding: Option[Int] = {
+    if (config.getString("akka.remote.log-frame-size-exceeding").toLowerCase == "off") None
+    else Some(getBytes("akka.remote.log-frame-size-exceeding").toInt)
+  }
+
   val UntrustedMode: Boolean = getBoolean("akka.remote.untrusted-mode")
 
-  val LogRemoteLifecycleEvents: Boolean = getBoolean("akka.remote.log-remote-lifecycle-events")
+  val TrustedSelectionPaths: Set[String] =
+    immutableSeq(getStringList("akka.remote.trusted-selection-paths")).toSet
+
+  val RemoteLifecycleEventsLogLevel: LogLevel = toRootLowerCase(getString("akka.remote.log-remote-lifecycle-events")) match {
+    case "on" ⇒ Logging.DebugLevel
+    case other ⇒ Logging.levelFor(other) match {
+      case Some(level) ⇒ level
+      case None        ⇒ throw new ConfigurationException("Logging level must be one of (on, off, debug, info, warning, error)")
+    }
+  }
+
+  val Dispatcher: String = getString("akka.remote.use-dispatcher")
+
+  def configureDispatcher(props: Props): Props = if (Dispatcher.isEmpty) props else props.withDispatcher(Dispatcher)
 
   val ShutdownTimeout: Timeout = {
-    Timeout(Duration(getMilliseconds("akka.remote.shutdown-timeout"), MILLISECONDS))
+    Timeout(config.getMillisDuration("akka.remote.shutdown-timeout"))
   } requiring (_.duration > Duration.Zero, "shutdown-timeout must be > 0")
 
   val FlushWait: FiniteDuration = {
-    Duration(getMilliseconds("akka.remote.flush-wait-on-shutdown"), MILLISECONDS)
+    config.getMillisDuration("akka.remote.flush-wait-on-shutdown")
   } requiring (_ > Duration.Zero, "flush-wait-on-shutdown must be > 0")
 
   val StartupTimeout: Timeout = {
-    Timeout(Duration(getMilliseconds("akka.remote.startup-timeout"), MILLISECONDS))
+    Timeout(config.getMillisDuration("akka.remote.startup-timeout"))
   } requiring (_.duration > Duration.Zero, "startup-timeout must be > 0")
 
   val RetryGateClosedFor: FiniteDuration = {
-    Duration(getMilliseconds("akka.remote.retry-gate-closed-for"), MILLISECONDS)
+    config.getMillisDuration("akka.remote.retry-gate-closed-for")
   } requiring (_ >= Duration.Zero, "retry-gate-closed-for must be >= 0")
-
-  val UnknownAddressGateClosedFor: FiniteDuration = {
-    Duration(getMilliseconds("akka.remote.gate-unknown-addresses-for"), MILLISECONDS)
-  } requiring (_ > Duration.Zero, "gate-unknown-addresses-for must be > 0")
 
   val UsePassiveConnections: Boolean = getBoolean("akka.remote.use-passive-connections")
 
-  val MaximumRetriesInWindow: Int = {
-    getInt("akka.remote.maximum-retries-in-window")
-  } requiring (_ > 0, "maximum-retries-in-window must be > 0")
-
-  val RetryWindow: FiniteDuration = {
-    Duration(getMilliseconds("akka.remote.retry-window"), MILLISECONDS)
-  } requiring (_ > Duration.Zero, "retry-window must be > 0")
-
   val BackoffPeriod: FiniteDuration = {
-    Duration(getMilliseconds("akka.remote.backoff-interval"), MILLISECONDS)
+    config.getMillisDuration("akka.remote.backoff-interval")
   } requiring (_ > Duration.Zero, "backoff-interval must be > 0")
 
+  val LogBufferSizeExceeding: Int = {
+    val key = "akka.remote.log-buffer-size-exceeding"
+    config.getString(key).toLowerCase match {
+      case "off" | "false" ⇒ Int.MaxValue
+      case _               ⇒ config.getInt(key)
+    }
+  }
+
   val SysMsgAckTimeout: FiniteDuration = {
-    Duration(getMilliseconds("akka.remote.system-message-ack-piggyback-timeout"), MILLISECONDS)
+    config.getMillisDuration("akka.remote.system-message-ack-piggyback-timeout")
   } requiring (_ > Duration.Zero, "system-message-ack-piggyback-timeout must be > 0")
 
   val SysResendTimeout: FiniteDuration = {
-    Duration(getMilliseconds("akka.remote.resend-interval"), MILLISECONDS)
+    config.getMillisDuration("akka.remote.resend-interval")
   } requiring (_ > Duration.Zero, "resend-interval must be > 0")
+
+  val SysResendLimit: Int = {
+    config.getInt("akka.remote.resend-limit")
+  } requiring (_ > 0, "resend-limit must be > 0")
 
   val SysMsgBufferSize: Int = {
     getInt("akka.remote.system-message-buffer-size")
   } requiring (_ > 0, "system-message-buffer-size must be > 0")
 
-  val QuarantineDuration: Duration = {
-    if (getString("akka.remote.quarantine-systems-for") == "off") Duration.Undefined
-    else Duration(getMilliseconds("akka.remote.quarantine-systems-for"), MILLISECONDS).requiring(_ > Duration.Zero,
-      "quarantine-systems-for must be > 0 or off")
+  val InitialSysMsgDeliveryTimeout: FiniteDuration = {
+    config.getMillisDuration("akka.remote.initial-system-message-delivery-timeout")
+  } requiring (_ > Duration.Zero, "initial-system-message-delivery-timeout must be > 0")
+
+  val QuarantineSilentSystemTimeout: FiniteDuration = {
+    config.getMillisDuration("akka.remote.quarantine-after-silence")
+  } requiring (_ > Duration.Zero, "quarantine-after-silence must be > 0")
+
+  val QuarantineDuration: FiniteDuration = {
+    config.getMillisDuration("akka.remote.prune-quarantine-marker-after").requiring(
+      _ > Duration.Zero,
+      "prune-quarantine-marker-after must be > 0 ms")
   }
 
   val CommandAckTimeout: Timeout = {
-    Timeout(Duration(getMilliseconds("akka.remote.command-ack-timeout"), MILLISECONDS))
+    Timeout(config.getMillisDuration("akka.remote.command-ack-timeout"))
   } requiring (_.duration > Duration.Zero, "command-ack-timeout must be > 0")
 
   val WatchFailureDetectorConfig: Config = getConfig("akka.remote.watch-failure-detector")
   val WatchFailureDetectorImplementationClass: String = WatchFailureDetectorConfig.getString("implementation-class")
   val WatchHeartBeatInterval: FiniteDuration = {
-    Duration(WatchFailureDetectorConfig.getMilliseconds("heartbeat-interval"), MILLISECONDS)
+    WatchFailureDetectorConfig.getMillisDuration("heartbeat-interval")
   } requiring (_ > Duration.Zero, "watch-failure-detector.heartbeat-interval must be > 0")
   val WatchUnreachableReaperInterval: FiniteDuration = {
-    Duration(WatchFailureDetectorConfig.getMilliseconds("unreachable-nodes-reaper-interval"), MILLISECONDS)
+    WatchFailureDetectorConfig.getMillisDuration("unreachable-nodes-reaper-interval")
   } requiring (_ > Duration.Zero, "watch-failure-detector.unreachable-nodes-reaper-interval must be > 0")
-  val WatchNumberOfEndHeartbeatRequests: Int = {
-    WatchFailureDetectorConfig.getInt("nr-of-end-heartbeats")
-  } requiring (_ > 0, "watch-failure-detector.nr-of-end-heartbeats must be > 0")
   val WatchHeartbeatExpectedResponseAfter: FiniteDuration = {
-    Duration(WatchFailureDetectorConfig.getMilliseconds("expected-response-after"), MILLISECONDS)
+    WatchFailureDetectorConfig.getMillisDuration("expected-response-after")
   } requiring (_ > Duration.Zero, "watch-failure-detector.expected-response-after > 0")
 
   val Transports: immutable.Seq[(String, immutable.Seq[String], Config)] = transportNames.map { name ⇒
     val transportConfig = transportConfigFor(name)
-    (transportConfig.getString("transport-class"),
+    (
+      transportConfig.getString("transport-class"),
       immutableSeq(transportConfig.getStringList("applied-adapters")).reverse,
       transportConfig)
   }

@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.camel.internal
@@ -10,8 +10,10 @@ import akka.camel.internal.component.CamelPath
 import org.apache.camel.builder.RouteBuilder
 import org.apache.camel.model.RouteDefinition
 
+import scala.language.existentials
+
 /**
- * For internal use only.
+ * INTERNAL API
  * Builder of a route to a target which can be an actor.
  *
  * @param endpointUri endpoint URI of the consumer actor.

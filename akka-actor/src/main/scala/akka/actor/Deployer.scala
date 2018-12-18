@@ -1,21 +1,21 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.actor
 
-import scala.concurrent.duration.Duration
-import com.typesafe.config._
-import akka.routing._
-import akka.japi.Util.immutableSeq
-import java.util.concurrent.{ TimeUnit }
-import akka.util.WildcardTree
 import java.util.concurrent.atomic.AtomicReference
+
+import akka.routing._
+import akka.util.WildcardIndex
+import com.typesafe.config._
+
 import scala.annotation.tailrec
 
 object Deploy {
   final val NoDispatcherGiven = ""
   final val NoMailboxGiven = ""
+  val local = Deploy(scope = LocalScope)
 }
 
 /**
@@ -35,12 +35,12 @@ object Deploy {
  */
 @SerialVersionUID(2L)
 final case class Deploy(
-  path: String = "",
-  config: Config = ConfigFactory.empty,
+  path:         String       = "",
+  config:       Config       = ConfigFactory.empty,
   routerConfig: RouterConfig = NoRouter,
-  scope: Scope = NoScopeGiven,
-  dispatcher: String = Deploy.NoDispatcherGiven,
-  mailbox: String = Deploy.NoMailboxGiven) {
+  scope:        Scope        = NoScopeGiven,
+  dispatcher:   String       = Deploy.NoDispatcherGiven,
+  mailbox:      String       = Deploy.NoMailboxGiven) {
 
   /**
    * Java API to create a Deploy with the given RouterConfig
@@ -60,7 +60,7 @@ final case class Deploy(
   /**
    * Do a merge between this and the other Deploy, where values from “this” take
    * precedence. The “path” of the other Deploy is not taken into account. All
-   * other members are merged using ``<X>.withFallback(other.<X>)``.
+   * other members are merged using `X.withFallback(other.X)`.
    */
   def withFallback(other: Deploy): Deploy = {
     Deploy(
@@ -99,6 +99,7 @@ abstract class LocalScope extends Scope
  * which do not set a different scope. It is also the only scope handled by
  * the LocalActorRefProvider.
  */
+@SerialVersionUID(1L)
 case object LocalScope extends LocalScope {
   /**
    * Java API: get the singleton instance
@@ -113,6 +114,7 @@ case object LocalScope extends LocalScope {
  */
 @SerialVersionUID(1L)
 abstract class NoScopeGiven extends Scope
+@SerialVersionUID(1L)
 case object NoScopeGiven extends NoScopeGiven {
   def withFallback(other: Scope): Scope = other
 
@@ -129,9 +131,14 @@ private[akka] class Deployer(val settings: ActorSystem.Settings, val dynamicAcce
 
   import scala.collection.JavaConverters._
 
-  private val deployments = new AtomicReference(WildcardTree[Deploy]())
+  private val resizerEnabled: Config = ConfigFactory.parseString("resizer.enabled=on")
+  private val deployments = new AtomicReference(WildcardIndex[Deploy]())
   private val config = settings.config.getConfig("akka.actor.deployment")
   protected val default = config.getConfig("default")
+  val routerTypeMapping: Map[String, String] =
+    settings.config.getConfig("akka.actor.router.type-mapping").root.unwrapped.asScala.collect {
+      case (key, value: String) ⇒ (key → value)
+    }.toMap
 
   config.root.asScala flatMap {
     case ("default", _)             ⇒ None
@@ -139,15 +146,19 @@ private[akka] class Deployer(val settings: ActorSystem.Settings, val dynamicAcce
     case _                          ⇒ None
   } foreach deploy
 
-  def lookup(path: ActorPath): Option[Deploy] = lookup(path.elements.drop(1).iterator)
+  def lookup(path: ActorPath): Option[Deploy] = lookup(path.elements.drop(1))
 
-  def lookup(path: Iterable[String]): Option[Deploy] = lookup(path.iterator)
-
-  def lookup(path: Iterator[String]): Option[Deploy] = deployments.get().find(path).data
+  def lookup(path: Iterable[String]): Option[Deploy] = deployments.get().find(path)
 
   def deploy(d: Deploy): Unit = {
-    @tailrec def add(path: Array[String], d: Deploy, w: WildcardTree[Deploy] = deployments.get): Unit =
-      if (!deployments.compareAndSet(w, w.insert(path.iterator, d))) add(path, d)
+    @tailrec def add(path: Array[String], d: Deploy, w: WildcardIndex[Deploy] = deployments.get): Unit = {
+      for (i ← path.indices) path(i) match {
+        case "" ⇒ throw InvalidActorNameException(s"Actor name in deployment [${d.path}] must not be empty")
+        case el ⇒ ActorPath.validatePathElement(el, fullPath = d.path)
+      }
+
+      if (!deployments.compareAndSet(w, w.insert(path, d))) add(path, d)
+    }
 
     add(d.path.split("/").drop(1), d)
   }
@@ -167,33 +178,35 @@ private[akka] class Deployer(val settings: ActorSystem.Settings, val dynamicAcce
    * @param config the user defined config of the deployment, without defaults
    * @param deployment the deployment config, with defaults
    */
-  protected def createRouterConfig(routerType: String, key: String, config: Config, deployment: Config): RouterConfig = {
-    val routees = immutableSeq(deployment.getStringList("routees.paths"))
-    val nrOfInstances = deployment.getInt("nr-of-instances")
-    val resizer = if (config.hasPath("resizer")) Some(DefaultResizer(deployment.getConfig("resizer"))) else None
+  protected def createRouterConfig(routerType: String, key: String, config: Config, deployment: Config): RouterConfig =
+    if (routerType == "from-code") NoRouter
+    else {
+      // need this for backwards compatibility, resizer enabled when including (parts of) resizer section in the deployment
+      val deployment2 =
+        if (config.hasPath("resizer") && !deployment.getBoolean("resizer.enabled"))
+          resizerEnabled.withFallback(deployment)
+        else deployment
 
-    routerType match {
-      case "from-code"        ⇒ NoRouter
-      case "round-robin"      ⇒ RoundRobinRouter(nrOfInstances, routees, resizer)
-      case "random"           ⇒ RandomRouter(nrOfInstances, routees, resizer)
-      case "smallest-mailbox" ⇒ SmallestMailboxRouter(nrOfInstances, routees, resizer)
-      case "broadcast"        ⇒ BroadcastRouter(nrOfInstances, routees, resizer)
-      case "scatter-gather" ⇒
-        val within = Duration(deployment.getMilliseconds("within"), TimeUnit.MILLISECONDS)
-        ScatterGatherFirstCompletedRouter(nrOfInstances, routees, within, resizer)
-      case "consistent-hashing" ⇒
-        val vnodes = deployment.getInt("virtual-nodes-factor")
-        ConsistentHashingRouter(nrOfInstances, routees, resizer, virtualNodesFactor = vnodes)
-      case fqn ⇒
-        val args = List(classOf[Config] -> deployment)
-        dynamicAccess.createInstanceFor[RouterConfig](fqn, args).recover({
-          case exception ⇒ throw new IllegalArgumentException(
-            ("Cannot instantiate router [%s], defined in [%s], " +
-              "make sure it extends [akka.routing.RouterConfig] and has constructor with " +
-              "[com.typesafe.config.Config] parameter")
-              .format(fqn, key), exception)
-        }).get
+      val fqn = routerTypeMapping.getOrElse(routerType, routerType)
+
+      def throwCannotInstantiateRouter(args: Seq[(Class[_], AnyRef)], cause: Throwable) =
+        throw new IllegalArgumentException(
+          s"Cannot instantiate router [$fqn], defined in [$key], " +
+            s"make sure it extends [${classOf[RouterConfig]}] and has constructor with " +
+            s"[${args(0)._1.getName}] and optional [${args(1)._1.getName}] parameter", cause)
+
+      // first try with Config param, and then with Config and DynamicAccess parameters
+      val args1 = List(classOf[Config] → deployment2)
+      val args2 = List(classOf[Config] → deployment2, classOf[DynamicAccess] → dynamicAccess)
+      dynamicAccess.createInstanceFor[RouterConfig](fqn, args1).recover({
+        case e @ (_: IllegalArgumentException | _: ConfigException) ⇒ throw e
+        case e: NoSuchMethodException ⇒
+          dynamicAccess.createInstanceFor[RouterConfig](fqn, args2).recover({
+            case e @ (_: IllegalArgumentException | _: ConfigException) ⇒ throw e
+            case _ ⇒ throwCannotInstantiateRouter(args2, e)
+          }).get
+        case e ⇒ throwCannotInstantiateRouter(args2, e)
+      }).get
     }
-  }
 
 }

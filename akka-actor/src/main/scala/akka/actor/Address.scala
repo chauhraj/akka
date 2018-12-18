@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor
 import java.net.URI
 import java.net.URISyntaxException
@@ -40,10 +41,13 @@ final case class Address private (protocol: String, system: String, host: Option
    */
   def hasGlobalScope: Boolean = host.isDefined
 
+  // store hashCode
+  @transient override lazy val hashCode: Int = scala.util.hashing.MurmurHash3.productHash(this)
+
   /**
    * Returns the canonical String representation of this Address formatted as:
    *
-   * <protocol>://<system>@<host>:<port>
+   * `protocol://system@host:port`
    */
   @transient
   override lazy val toString: String = {
@@ -58,7 +62,7 @@ final case class Address private (protocol: String, system: String, host: Option
   /**
    * Returns a String representation formatted as:
    *
-   * <system>@<host>:<port>
+   * `system@host:port`
    */
   def hostPort: String = toString.substring(protocol.length + 3)
 }
@@ -73,6 +77,18 @@ object Address {
    * Constructs a new Address with the specified protocol, system name, host and port
    */
   def apply(protocol: String, system: String, host: String, port: Int) = new Address(protocol, system, Some(host), Some(port))
+
+  /**
+   * `Address` ordering type class, sorts addresses by protocol, name, host and port.
+   */
+  implicit val addressOrdering: Ordering[Address] = Ordering.fromLessThan[Address] { (a, b) ⇒
+    if (a eq b) false
+    else if (a.protocol != b.protocol) a.system.compareTo(b.protocol) < 0
+    else if (a.system != b.system) a.system.compareTo(b.system) < 0
+    else if (a.host != b.host) a.host.getOrElse("").compareTo(b.host.getOrElse("")) < 0
+    else if (a.port != b.port) a.port.getOrElse(0) < b.port.getOrElse(0)
+    else false
+  }
 }
 
 private[akka] trait PathUtils {
@@ -90,6 +106,13 @@ private[akka] trait PathUtils {
   }
 }
 
+/**
+ * Extractor for so-called “relative actor paths” as in “relative URI”, not in
+ * “relative to some actor”. Examples:
+ *
+ *  * "grand/child"
+ *  * "/user/hello/world"
+ */
 object RelativeActorPath extends PathUtils {
   def unapply(addr: String): Option[immutable.Seq[String]] = {
     try {

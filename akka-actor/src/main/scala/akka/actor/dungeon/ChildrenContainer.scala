@@ -1,5 +1,5 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.actor.dungeon
@@ -7,7 +7,6 @@ package akka.actor.dungeon
 import scala.collection.immutable
 
 import akka.actor.{ InvalidActorNameException, ChildStats, ChildRestartStats, ChildNameReserved, ActorRef }
-import akka.dispatch.sysmsg.{ EarliestFirstSystemMessageList, SystemMessageList, LatestFirstSystemMessageList, SystemMessage }
 import akka.util.Collections.{ EmptyImmutableSeq, PartialImmutableValuesIterable }
 
 /**
@@ -46,8 +45,8 @@ private[akka] object ChildrenContainer {
   sealed trait SuspendReason
   case object UserRequest extends SuspendReason
   // careful with those system messages, all handling to be taking place in ActorCell.scala!
-  case class Recreation(cause: Throwable) extends SuspendReason with WaitingForChildren
-  case class Creation() extends SuspendReason with WaitingForChildren
+  final case class Recreation(cause: Throwable) extends SuspendReason with WaitingForChildren
+  final case class Creation() extends SuspendReason with WaitingForChildren
   case object Termination extends SuspendReason
 
   class ChildRestartsIterable(stats: immutable.MapLike[_, ChildStats, _]) extends PartialImmutableValuesIterable[ChildStats, ChildRestartStats] {
@@ -127,7 +126,7 @@ private[akka] object ChildrenContainer {
 
     override def reserve(name: String): ChildrenContainer =
       if (c contains name)
-        throw new InvalidActorNameException(s"actor name [$name] is not unique!")
+        throw InvalidActorNameException(s"actor name [$name] is not unique!")
       else new NormalChildrenContainer(c.updated(name, ChildNameReserved))
 
     override def unreserve(name: String): ChildrenContainer = c.get(name) match {
@@ -156,7 +155,7 @@ private[akka] object ChildrenContainer {
    * type of container, depending on whether or not children are left and whether or not
    * the reason was “Terminating”.
    */
-  case class TerminatingChildrenContainer(c: immutable.TreeMap[String, ChildStats], toDie: Set[ActorRef], reason: SuspendReason)
+  final case class TerminatingChildrenContainer(c: immutable.TreeMap[String, ChildStats], toDie: Set[ActorRef], reason: SuspendReason)
     extends ChildrenContainer {
 
     override def add(name: String, stats: ChildRestartStats): ChildrenContainer = copy(c.updated(name, stats))
@@ -189,7 +188,7 @@ private[akka] object ChildrenContainer {
       case Termination ⇒ throw new IllegalStateException("cannot reserve actor name '" + name + "': terminating")
       case _ ⇒
         if (c contains name)
-          throw new InvalidActorNameException(s"actor name [$name] is not unique!")
+          throw InvalidActorNameException(s"actor name [$name] is not unique!")
         else copy(c = c.updated(name, ChildNameReserved))
     }
 

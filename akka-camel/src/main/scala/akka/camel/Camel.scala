@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.camel
@@ -11,8 +11,8 @@ import org.apache.camel.ProducerTemplate
 import org.apache.camel.impl.DefaultCamelContext
 import org.apache.camel.model.RouteDefinition
 import com.typesafe.config.Config
-import scala.concurrent.duration.{ Duration, FiniteDuration }
-import java.util.concurrent.TimeUnit._
+import scala.concurrent.duration.FiniteDuration
+import scala.collection.immutable
 
 /**
  * Camel trait encapsulates the underlying camel machinery.
@@ -42,12 +42,14 @@ trait Camel extends Extension with Activation {
   def settings: CamelSettings
 
   /**
-   * For internal use only. Returns the camel supervisor actor.
+   * INTERNAL API
+   * Returns the camel supervisor actor.
    */
   private[camel] def supervisor: ActorRef
 
   /**
-   * For internal use only. Returns the associated ActorSystem.
+   * INTERNAL API
+   * Returns the associated ActorSystem.
    */
   private[camel] def system: ActorSystem
 }
@@ -57,17 +59,19 @@ trait Camel extends Extension with Activation {
  * @param config the config
  */
 class CamelSettings private[camel] (config: Config, dynamicAccess: DynamicAccess) {
+  import akka.util.Helpers.ConfigOps
+
   /**
    * Configured setting for how long the actor should wait for activation before it fails.
    */
-  final val ActivationTimeout: FiniteDuration = Duration(config.getMilliseconds("akka.camel.consumer.activation-timeout"), MILLISECONDS)
+  final val ActivationTimeout: FiniteDuration = config.getMillisDuration("akka.camel.consumer.activation-timeout")
 
   /**
    * Configured setting, when endpoint is out-capable (can produce responses) replyTimeout is the maximum time
    * the endpoint can take to send the response before the message exchange fails.
    * This setting is used for out-capable, in-only, manually acknowledged communication.
    */
-  final val ReplyTimeout: FiniteDuration = Duration(config.getMilliseconds("akka.camel.consumer.reply-timeout"), MILLISECONDS)
+  final val ReplyTimeout: FiniteDuration = config.getMillisDuration("akka.camel.consumer.reply-timeout")
 
   /**
    * Configured setting which determines whether one-way communications between an endpoint and this consumer actor
@@ -76,15 +80,14 @@ class CamelSettings private[camel] (config: Config, dynamicAccess: DynamicAccess
    */
   final val AutoAck: Boolean = config.getBoolean("akka.camel.consumer.auto-ack")
 
-  /**
-   *
-   */
   final val JmxStatistics: Boolean = config.getBoolean("akka.camel.jmx")
 
   /**
    * enables or disables streamingCache on the Camel Context
    */
   final val StreamingCache: Boolean = config.getBoolean("akka.camel.streamingCache")
+
+  final val ProducerChildDispatcher: String = config.getString("akka.camel.producer.use-dispatcher")
 
   final val Conversions: (String, RouteDefinition) ⇒ RouteDefinition = {
     val specifiedConversions = {
@@ -101,8 +104,17 @@ class CamelSettings private[camel] (config: Config, dynamicAccess: DynamicAccess
 
     (s: String, r: RouteDefinition) ⇒ conversions.get(s).fold(r)(r.convertBodyTo)
   }
-
+  /**
+   * Configured setting, determine the class used to load/retrieve the instance of the Camel Context
+   */
+  final val ContextProvider: ContextProvider = {
+    val fqcn = config.getString("akka.camel.context-provider")
+    dynamicAccess.createInstanceFor[ContextProvider](fqcn, immutable.Seq.empty).recover {
+      case e ⇒ throw new ConfigurationException("Could not find/load Context Provider class [" + fqcn + "]", e)
+    }.get
+  }
 }
+
 /**
  * This class can be used to get hold of an instance of the Camel class bound to the actor system.
  * <p>For example:
@@ -114,7 +126,6 @@ class CamelSettings private[camel] (config: Config, dynamicAccess: DynamicAccess
  *
  * @see akka.actor.ExtensionId
  * @see akka.actor.ExtensionIdProvider
- *
  */
 object CamelExtension extends ExtensionId[Camel] with ExtensionIdProvider {
 
@@ -122,7 +133,7 @@ object CamelExtension extends ExtensionId[Camel] with ExtensionIdProvider {
    * Creates a new instance of Camel and makes sure it gets stopped when the actor system is shutdown.
    */
   override def createExtension(system: ExtendedActorSystem): Camel = {
-    val camel = new DefaultCamel(system).start
+    val camel = new DefaultCamel(system).start()
     system.registerOnTermination(camel.shutdown())
     camel
   }

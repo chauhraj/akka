@@ -1,5 +1,5 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.dispatch
@@ -15,19 +15,16 @@ import scala.concurrent.duration.FiniteDuration
  * the `lookup` method in [[akka.dispatch.Dispatchers]].
  */
 class PinnedDispatcher(
-  _prerequisites: DispatcherPrerequisites,
-  _actor: ActorCell,
-  _id: String,
-  _mailboxType: MailboxType,
-  _mailboxTypeConfigured: Boolean,
-  _shutdownTimeout: FiniteDuration,
+  _configurator:     MessageDispatcherConfigurator,
+  _actor:            ActorCell,
+  _id:               String,
+  _shutdownTimeout:  FiniteDuration,
   _threadPoolConfig: ThreadPoolConfig)
-  extends Dispatcher(_prerequisites,
+  extends Dispatcher(
+    _configurator,
     _id,
     Int.MaxValue,
     Duration.Zero,
-    _mailboxType,
-    _mailboxTypeConfigured,
     _threadPoolConfig.copy(corePoolSize = 1, maxPoolSize = 1),
     _shutdownTimeout) {
 

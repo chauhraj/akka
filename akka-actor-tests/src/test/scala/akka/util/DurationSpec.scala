@@ -1,6 +1,7 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.util
 
 import language.postfixOps
@@ -18,13 +19,13 @@ class DurationSpec extends AkkaSpec {
       val one = 1 second
       val two = one + one
       val three = 3 * one
-      (0 * one) must be(zero)
-      (2 * one) must be(two)
-      (three - two) must be(one)
-      (three / 3) must be(one)
-      (two / one) must be(2)
-      (one + zero) must be(one)
-      (one / 1000000) must be(1.micro)
+      (0 * one) should ===(zero)
+      (2 * one) should ===(two)
+      (three - two) should ===(one)
+      (three / 3) should ===(one)
+      (two / one) should ===(2D)
+      (one + zero) should ===(one)
+      (one / 1000000) should ===(1.micro)
     }
 
     "respect correct treatment of infinities" in {
@@ -32,21 +33,21 @@ class DurationSpec extends AkkaSpec {
       val inf = Duration.Inf
       val minf = Duration.MinusInf
       val undefined = Duration.Undefined
-      (-inf) must be(minf)
-      (minf + inf) must be(undefined)
-      (inf - inf) must be(undefined)
-      (inf + minf) must be(undefined)
-      (minf - minf) must be(undefined)
-      (inf + inf) must be(inf)
-      (inf - minf) must be(inf)
-      (minf - inf) must be(minf)
-      (minf + minf) must be(minf)
+      (-inf) should ===(minf)
+      (minf + inf) should ===(undefined)
+      (inf - inf) should ===(undefined)
+      (inf + minf) should ===(undefined)
+      (minf - minf) should ===(undefined)
+      (inf + inf) should ===(inf)
+      (inf - minf) should ===(inf)
+      (minf - inf) should ===(minf)
+      (minf + minf) should ===(minf)
       assert(inf == inf)
       assert(minf == minf)
-      inf.compareTo(inf) must be(0)
-      inf.compareTo(one) must be(1)
-      minf.compareTo(minf) must be(0)
-      minf.compareTo(one) must be(-1)
+      inf.compareTo(inf) should ===(0)
+      inf.compareTo(one) should ===(1)
+      minf.compareTo(minf) should ===(0)
+      minf.compareTo(one) should ===(-1)
       assert(inf != minf)
       assert(minf != inf)
       assert(one != inf)
@@ -58,7 +59,7 @@ class DurationSpec extends AkkaSpec {
         val x = unit.convert(Long.MaxValue, NANOSECONDS)
         val dur = Duration(x, unit)
         val mdur = Duration(-x, unit)
-        -mdur must be(dur)
+        -mdur should ===(dur)
         intercept[IllegalArgumentException] { Duration(x + 10000000d, unit) }
         intercept[IllegalArgumentException] { Duration(-x - 10000000d, unit) }
         if (unit != NANOSECONDS) {
@@ -86,11 +87,11 @@ class DurationSpec extends AkkaSpec {
       val dead = 2.seconds.fromNow
       val dead2 = 2 seconds fromNow
       // view bounds vs. very local type inference vs. operator precedence: sigh
-      dead.timeLeft must be > (1 second: Duration)
-      dead2.timeLeft must be > (1 second: Duration)
+      dead.timeLeft should be > (1 second: Duration)
+      dead2.timeLeft should be > (1 second: Duration)
       Thread.sleep(1.second.toMillis)
-      dead.timeLeft must be < (1 second: Duration)
-      dead2.timeLeft must be < (1 second: Duration)
+      dead.timeLeft should be < (1 second: Duration)
+      dead2.timeLeft should be < (1 second: Duration)
     }
 
   }

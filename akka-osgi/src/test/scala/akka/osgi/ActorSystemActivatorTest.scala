@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.osgi
 
 import language.postfixOps
@@ -16,7 +17,7 @@ import de.kalpatec.pojosr.framework.launch.BundleDescriptor
 import test.{ RuntimeNameActorSystemActivator, TestActivators, PingPongActorSystemActivator }
 import test.PingPong._
 import PojoSRTestSupport.bundle
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.Matchers
 
 /**
  * Test cases for [[akka.osgi.ActorSystemActivator]] in 2 different scenarios:
@@ -29,7 +30,7 @@ object ActorSystemActivatorTest {
 
 }
 
-class PingPongActorSystemActivatorTest extends WordSpec with MustMatchers with PojoSRTestSupport {
+class PingPongActorSystemActivatorTest extends WordSpec with Matchers with PojoSRTestSupport {
 
   import ActorSystemActivatorTest._
 
@@ -41,28 +42,28 @@ class PingPongActorSystemActivatorTest extends WordSpec with MustMatchers with P
     "start and register the ActorSystem when bundle starts" in {
       filterErrors() {
         val system = serviceForType[ActorSystem]
-        val actor = system.actorFor("/user/pong")
+        val actor = system.actorSelection("/user/pong")
 
         implicit val timeout = Timeout(5 seconds)
-        Await.result(actor ? Ping, timeout.duration) must be(Pong)
+        Await.result(actor ? Ping, timeout.duration) should be(Pong)
       }
     }
 
     "stop the ActorSystem when bundle stops" in {
       filterErrors() {
         val system = serviceForType[ActorSystem]
-        system.isTerminated must be(false)
+        system.whenTerminated.isCompleted should be(false)
 
         bundleForName(TEST_BUNDLE_NAME).stop()
-        system.awaitTermination()
-        system.isTerminated must be(true)
+        Await.ready(system.whenTerminated, Duration.Inf)
+        system.whenTerminated.isCompleted should be(true)
       }
     }
   }
 
 }
 
-class RuntimeNameActorSystemActivatorTest extends WordSpec with MustMatchers with PojoSRTestSupport {
+class RuntimeNameActorSystemActivatorTest extends WordSpec with Matchers with PojoSRTestSupport {
 
   import ActorSystemActivatorTest._
 
@@ -73,7 +74,7 @@ class RuntimeNameActorSystemActivatorTest extends WordSpec with MustMatchers wit
 
     "register an ActorSystem and add the bundle id to the system name" in {
       filterErrors() {
-        serviceForType[ActorSystem].name must equal(TestActivators.ACTOR_SYSTEM_NAME_PATTERN.format(bundleForName(TEST_BUNDLE_NAME).getBundleId))
+        serviceForType[ActorSystem].name should be(TestActivators.ACTOR_SYSTEM_NAME_PATTERN.format(bundleForName(TEST_BUNDLE_NAME).getBundleId))
       }
     }
   }

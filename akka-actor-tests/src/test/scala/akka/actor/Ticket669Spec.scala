@@ -1,14 +1,13 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor
 
 import language.postfixOps
 
-import java.util.concurrent.{ CountDownLatch, TimeUnit }
-import akka.actor._
 import org.scalatest.BeforeAndAfterAll
-import akka.testkit.{ TestKit, filterEvents, EventFilter }
+import akka.testkit.{ filterEvents, EventFilter }
 import akka.testkit.AkkaSpec
 import akka.testkit.ImplicitSender
 import akka.testkit.DefaultTimeout
@@ -16,12 +15,11 @@ import scala.concurrent.Await
 import akka.pattern.ask
 import scala.concurrent.duration._
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class Ticket669Spec extends AkkaSpec with BeforeAndAfterAll with ImplicitSender with DefaultTimeout {
   import Ticket669Spec._
 
   // TODO: does this really make sense?
-  override def atStartup() {
+  override def atStartup(): Unit = {
     Thread.interrupted() //remove interrupted status.
   }
 
@@ -58,12 +56,12 @@ object Ticket669Spec {
       case msg ⇒ throw new Exception("test")
     }
 
-    override def preRestart(reason: scala.Throwable, msg: Option[Any]) {
-      sender ! "failure1"
+    override def preRestart(reason: scala.Throwable, msg: Option[Any]): Unit = {
+      sender() ! "failure1"
     }
 
-    override def postStop() {
-      sender ! "failure2"
+    override def postStop(): Unit = {
+      sender() ! "failure2"
     }
   }
 }

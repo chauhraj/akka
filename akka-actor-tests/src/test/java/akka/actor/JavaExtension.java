@@ -1,20 +1,18 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.actor;
 
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
-
+import akka.testkit.AkkaJUnitActorSystemResource;
+import org.junit.*;
 import akka.testkit.AkkaSpec;
-
 import com.typesafe.config.ConfigFactory;
-import com.typesafe.config.Config;
+import org.scalatest.junit.JUnitSuite;
 
 import static org.junit.Assert.*;
 
-public class JavaExtension {
+public class JavaExtension extends JUnitSuite {
 
   static class TestExtensionId extends AbstractExtensionId<TestExtension> implements ExtensionIdProvider {
     public final static TestExtensionId TestExtensionProvider = new TestExtensionId();
@@ -36,9 +34,24 @@ public class JavaExtension {
     }
   }
 
+  static class OtherExtensionId extends AbstractExtensionId<OtherExtension> implements ExtensionIdProvider {
+
+    public final static OtherExtensionId OtherExtensionProvider = new OtherExtensionId();
+
+    @Override
+    public ExtensionId<OtherExtension> lookup() {
+      return OtherExtensionId.OtherExtensionProvider;
+    }
+
+    @Override
+    public OtherExtension createExtension(ExtendedActorSystem system) {
+      return new OtherExtension(system);
+    }
+
+  }
+
   static class OtherExtension implements Extension {
-    static final ExtensionKey<OtherExtension> key = new ExtensionKey<OtherExtension>(OtherExtension.class) {
-    };
+    static final ExtensionId<OtherExtension> key = OtherExtensionId.OtherExtensionProvider;
 
     public final ExtendedActorSystem system;
 
@@ -47,20 +60,13 @@ public class JavaExtension {
     }
   }
 
-  private static ActorSystem system;
+  @ClassRule
+  public static AkkaJUnitActorSystemResource actorSystemResource =
+    new AkkaJUnitActorSystemResource("JavaExtension",
+      ConfigFactory.parseString("akka.extensions = [ \"akka.actor.JavaExtension$TestExtensionId\" ]")
+      .withFallback(AkkaSpec.testConf()));
 
-  @BeforeClass
-  public static void beforeAll() {
-    Config c = ConfigFactory.parseString("akka.extensions = [ \"akka.actor.JavaExtension$TestExtensionId\" ]")
-        .withFallback(AkkaSpec.testConf());
-    system = ActorSystem.create("JavaExtension", c);
-  }
-
-  @AfterClass
-  public static void afterAll() {
-    system.shutdown();
-    system = null;
-  }
+  private final ActorSystem system = actorSystemResource.getSystem();
 
   @Test
   public void mustBeAccessible() {

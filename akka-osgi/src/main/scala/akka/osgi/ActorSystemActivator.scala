@@ -1,6 +1,7 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.osgi
 
 import akka.actor.ActorSystem
@@ -21,7 +22,7 @@ import com.typesafe.config.{ ConfigFactory, Config }
 abstract class ActorSystemActivator extends BundleActivator {
 
   private var system: Option[ActorSystem] = None
-  private var registration: Option[ServiceRegistration] = None
+  private var registration: Option[ServiceRegistration[_]] = None
 
   /**
    * Implement this method to add your own actors to the ActorSystem.  If you want to share the actor
@@ -50,9 +51,9 @@ abstract class ActorSystemActivator extends BundleActivator {
    * @param context  the BundleContext
    * @param  system  the ActorSystem to be advertised
    */
-  def addLogServiceListener(context: BundleContext, system: ActorSystem) {
+  def addLogServiceListener(context: BundleContext, system: ActorSystem): Unit = {
     val logServiceListner = new ServiceListener {
-      def serviceChanged(event: ServiceEvent) {
+      def serviceChanged(event: ServiceEvent): Unit = {
         event.getType match {
           case ServiceEvent.REGISTERED ⇒
             system.eventStream.publish(serviceForReference[LogService](context, event.getServiceReference))
@@ -63,7 +64,7 @@ abstract class ActorSystemActivator extends BundleActivator {
     val filter = s"(objectclass=${classOf[LogService].getName})"
     context.addServiceListener(logServiceListner, filter)
 
-    //Small trick to create an event if the service is registred before this start listing for
+    //Small trick to create an event if the service is registered before this start listing for
     Option(context.getServiceReference(classOf[LogService].getName)).foreach(x ⇒ {
       logServiceListner.serviceChanged(new ServiceEvent(ServiceEvent.REGISTERED, x))
     })
@@ -72,7 +73,7 @@ abstract class ActorSystemActivator extends BundleActivator {
   /**
    * Convenience method to find a service by its reference.
    */
-  def serviceForReference[T](context: BundleContext, reference: ServiceReference): T =
+  def serviceForReference[T](context: BundleContext, reference: ServiceReference[_]): T =
     context.getService(reference).asInstanceOf[T]
 
   /**
@@ -82,7 +83,7 @@ abstract class ActorSystemActivator extends BundleActivator {
    */
   def stop(context: BundleContext): Unit = {
     registration foreach (_.unregister())
-    system foreach (_.shutdown())
+    system foreach (_.terminate())
   }
 
   /**
@@ -103,7 +104,7 @@ abstract class ActorSystemActivator extends BundleActivator {
   }
 
   /**
-   * By default, the [[akka.actor.ActorSystem]] name will be set to `bundle-<bundle id>-ActorSystem`.  Override this
+   * By default, the [[akka.actor.ActorSystem]] name will be set to `bundle-&lt;bundle id&gt;-ActorSystem`.  Override this
    * method to define another name for your [[akka.actor.ActorSystem]] instance.
    *
    * @param context the bundle context

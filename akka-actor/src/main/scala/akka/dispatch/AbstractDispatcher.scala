@@ -1,46 +1,33 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.dispatch
 
 import java.util.concurrent._
-import akka.event.Logging.{ Error, LogEventException }
+import java.{ util ⇒ ju }
+
 import akka.actor._
+import akka.dispatch.affinity.AffinityPoolConfigurator
 import akka.dispatch.sysmsg._
 import akka.event.EventStream
+import akka.event.Logging.{ Debug, Error, LogEventException }
+import akka.util.{ Index, Unsafe, unused }
 import com.typesafe.config.Config
-import akka.util.{ Unsafe, Index }
+
 import scala.annotation.tailrec
-import scala.concurrent.forkjoin.{ ForkJoinTask, ForkJoinPool }
-import scala.concurrent.duration.Duration
-import scala.concurrent.ExecutionContext
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.{ ExecutionContext, ExecutionContextExecutor }
+import scala.concurrent.duration.{ Duration, FiniteDuration }
 import scala.util.control.NonFatal
 
 final case class Envelope private (val message: Any, val sender: ActorRef)
 
 object Envelope {
   def apply(message: Any, sender: ActorRef, system: ActorSystem): Envelope = {
-    if (message == null) throw new InvalidMessageException("Message is null")
+    if (message == null) throw InvalidMessageException("Message is null")
     new Envelope(message, if (sender ne Actor.noSender) sender else system.deadLetters)
   }
 }
-
-/**
- * This message is sent directly after the Supervise system message in order
- * to form a barrier wrt. the first real message sent by the child, so that e.g.
- * Failed() cannot overtake Supervise(). Processing this does nothing.
- *
- * Detailed explanation:
- *
- * The race happens because Supervise and Failed may be queued between the
- * parent's check for system messages and dequeue(). Thus, if the parent
- * processes the NullMessage first (by way of that tiny race window), it is
- * guaranteed to then find the Supervise system message in its mailbox prior
- * to turning its attention to the next real message.
- */
-case object NullMessage extends AutoReceivedMessage
 
 final case class TaskInvocation(eventStream: EventStream, runnable: Runnable, cleanup: () ⇒ Unit) extends Batchable {
   final override def isBatchable: Boolean = runnable match {
@@ -73,7 +60,9 @@ private[akka] object MessageDispatcher {
   // dispatcher debugging helper using println (see below)
   // since this is a compile-time constant, scalac will elide code behind if (MessageDispatcher.debug) (RK checked with 2.9.1)
   final val debug = false // Deliberately without type ascription to make it a compile-time constant
-  lazy val actors = new Index[MessageDispatcher, ActorRef](16, _ compareTo _)
+  lazy val actors = new Index[MessageDispatcher, ActorRef](16, new ju.Comparator[ActorRef] {
+    override def compare(a: ActorRef, b: ActorRef): Int = a.compareTo(b)
+  })
   def printActors(): Unit =
     if (debug) {
       for {
@@ -94,26 +83,29 @@ private[akka] object MessageDispatcher {
     }
 }
 
-abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) extends AbstractMessageDispatcher with BatchingExecutor with ExecutionContext {
+abstract class MessageDispatcher(val configurator: MessageDispatcherConfigurator) extends AbstractMessageDispatcher with BatchingExecutor with ExecutionContextExecutor {
 
-  import MessageDispatcher._
   import AbstractMessageDispatcher.{ inhabitantsOffset, shutdownScheduleOffset }
-  import prerequisites._
+  import MessageDispatcher._
+  import configurator.prerequisites
+
+  val mailboxes = prerequisites.mailboxes
+  val eventStream = prerequisites.eventStream
 
   @volatile private[this] var _inhabitantsDoNotCallMeDirectly: Long = _ // DO NOT TOUCH!
   @volatile private[this] var _shutdownScheduleDoNotCallMeDirectly: Int = _ // DO NOT TOUCH!
 
-  @tailrec private final def addInhabitants(add: Long): Long = {
-    val c = inhabitants
-    val r = c + add
-    if (r < 0) {
+  private final def addInhabitants(add: Long): Long = {
+    val old = Unsafe.instance.getAndAddLong(this, inhabitantsOffset, add)
+    val ret = old + add
+    if (ret < 0) {
       // We haven't succeeded in decreasing the inhabitants yet but the simple fact that we're trying to
       // go below zero means that there is an imbalance and we might as well throw the exception
       val e = new IllegalStateException("ACTOR SYSTEM CORRUPTED!!! A dispatcher can't have less than 0 inhabitants!")
       reportFailure(e)
       throw e
     }
-    if (Unsafe.instance.compareAndSwapLong(this, inhabitantsOffset, c, r)) r else addInhabitants(add)
+    ret
   }
 
   final def inhabitants: Long = Unsafe.instance.getLongVolatile(this, inhabitantsOffset)
@@ -124,18 +116,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
   /**
    *  Creates and returns a mailbox for the given actor.
    */
-  protected[akka] def createMailbox(actor: Cell): Mailbox //FIXME should this really be private[akka]?
-
-  /**
-   * Finds out the mailbox type for an actor based on configuration, props and requirements.
-   */
-  protected[akka] def getMailboxType(actor: Cell, mailboxType: MailboxType, mailboxTypeConfigured: Boolean): MailboxType =
-    actor.props.mailbox.flatMap(id ⇒ actor.system.mailboxes.lookup(id)) match {
-      case Some(x)                       ⇒ x
-      case None if mailboxTypeConfigured ⇒ mailboxType
-      case None ⇒ actor.system.mailboxes.getRequiredType(actor.props.actorClass).
-        flatMap(c ⇒ actor.system.mailboxes.lookupByQueueType(c)).getOrElse(mailboxType)
-    }
+  protected[akka] def createMailbox(actor: Cell, mailboxType: MailboxType): Mailbox
 
   /**
    * Identifier of this dispatcher, corresponds to the full key
@@ -157,7 +138,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
    * Detaches the specified actor instance from this dispatcher
    */
   final def detach(actor: ActorCell): Unit = try unregister(actor) finally ifSensibleToDoSoThenScheduleShutdown()
-
+  final protected def resubmitOnBlock: Boolean = true // We want to avoid starvation
   final override protected def unbatchedExecute(r: Runnable): Unit = {
     val invocation = TaskInvocation(eventStream, r, taskCleanup)
     addInhabitants(+1)
@@ -171,8 +152,8 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
   }
 
   override def reportFailure(t: Throwable): Unit = t match {
-    case e: LogEventException ⇒ prerequisites.eventStream.publish(e.event)
-    case _                    ⇒ prerequisites.eventStream.publish(Error(t, getClass.getName, getClass, t.getMessage))
+    case e: LogEventException ⇒ eventStream.publish(e.event)
+    case _                    ⇒ eventStream.publish(Error(t, getClass.getName, getClass, t.getMessage))
   }
 
   @tailrec
@@ -190,11 +171,17 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
 
   private def scheduleShutdownAction(): Unit = {
     // IllegalStateException is thrown if scheduler has been shutdown
-    try scheduler.scheduleOnce(shutdownTimeout, shutdownAction)(new ExecutionContext {
+    try prerequisites.scheduler.scheduleOnce(shutdownTimeout, shutdownAction)(new ExecutionContext {
       override def execute(runnable: Runnable): Unit = runnable.run()
       override def reportFailure(t: Throwable): Unit = MessageDispatcher.this.reportFailure(t)
     }) catch {
-      case _: IllegalStateException ⇒ shutdown()
+      case _: IllegalStateException ⇒
+        shutdown()
+        // Since there is no scheduler anymore, restore the state to UNSCHEDULED.
+        // When this dispatcher is used again,
+        // shutdown is only attempted if the state is UNSCHEDULED
+        // (as per ifSensibleToDoSoThenScheduleShutdown above)
+        updateShutdownSchedule(SCHEDULED, UNSCHEDULED)
     }
   }
 
@@ -205,7 +192,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
    *
    * INTERNAL API
    */
-  protected[akka] def register(actor: ActorCell) {
+  protected[akka] def register(actor: ActorCell): Unit = {
     if (debug) actors.put(this, actor.self)
     addInhabitants(+1)
   }
@@ -215,17 +202,17 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
    *
    * INTERNAL API
    */
-  protected[akka] def unregister(actor: ActorCell) {
+  protected[akka] def unregister(actor: ActorCell): Unit = {
     if (debug) actors.remove(this, actor.self)
     addInhabitants(-1)
-    val mailBox = actor.swapMailbox(deadLetterMailbox)
+    val mailBox = actor.swapMailbox(mailboxes.deadLetterMailbox)
     mailBox.becomeClosed()
     mailBox.cleanUp()
   }
 
   private val shutdownAction = new Runnable {
     @tailrec
-    final def run() {
+    final def run(): Unit = {
       shutdownSchedule match {
         case SCHEDULED ⇒
           try {
@@ -273,14 +260,14 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
    *
    * INTERNAL API
    */
-  protected[akka] def systemDispatch(receiver: ActorCell, invocation: SystemMessage)
+  protected[akka] def systemDispatch(receiver: ActorCell, invocation: SystemMessage): Unit
 
   /**
    * Will be called when the dispatcher is to queue an invocation for execution
    *
    * INTERNAL API
    */
-  protected[akka] def dispatch(receiver: ActorCell, invocation: Envelope)
+  protected[akka] def dispatch(receiver: ActorCell, invocation: Envelope): Unit
 
   /**
    * Suggest to register the provided mailbox for execution
@@ -308,7 +295,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
   /**
    * INTERNAL API
    */
-  protected[akka] def executeTask(invocation: TaskInvocation)
+  protected[akka] def executeTask(invocation: TaskInvocation): Unit
 
   /**
    * Called one time every time an actor is detached from this dispatcher and this dispatcher has no actors left attached
@@ -322,12 +309,14 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
 /**
  * An ExecutorServiceConfigurator is a class that given some prerequisites and a configuration can create instances of ExecutorService
  */
-abstract class ExecutorServiceConfigurator(config: Config, prerequisites: DispatcherPrerequisites) extends ExecutorServiceFactoryProvider
+abstract class ExecutorServiceConfigurator(@unused config: Config, @unused prerequisites: DispatcherPrerequisites) extends ExecutorServiceFactoryProvider
 
 /**
  * Base class to be used for hooking in new dispatchers into Dispatchers.
  */
-abstract class MessageDispatcherConfigurator(val config: Config, val prerequisites: DispatcherPrerequisites) {
+abstract class MessageDispatcherConfigurator(_config: Config, val prerequisites: DispatcherPrerequisites) {
+
+  val config: Config = new CachingConfig(_config)
 
   /**
    * Returns an instance of MessageDispatcher given the configuration.
@@ -336,51 +325,27 @@ abstract class MessageDispatcherConfigurator(val config: Config, val prerequisit
    */
   def dispatcher(): MessageDispatcher
 
-  /**
-   * Returns a factory for the [[akka.dispatch.Mailbox]] given the configuration.
-   * Default implementation instantiate the [[akka.dispatch.MailboxType]] specified
-   * as FQCN in mailbox-type config property. If mailbox-type is unspecified (empty)
-   * then [[akka.dispatch.UnboundedMailbox]] is used when capacity is < 1,
-   * otherwise [[akka.dispatch.BoundedMailbox]].
-   */
-  def mailboxType(): MailboxType = {
-    config.getString("mailbox-type") match {
-      case "" ⇒
-        if (config.getInt("mailbox-capacity") < 1) UnboundedMailbox()
-        else new BoundedMailbox(prerequisites.settings, config)
-      case "unbounded" ⇒ UnboundedMailbox()
-      case "bounded"   ⇒ new BoundedMailbox(prerequisites.settings, config)
-      case fqcn ⇒
-        val args = List(classOf[ActorSystem.Settings] -> prerequisites.settings, classOf[Config] -> config)
-        prerequisites.dynamicAccess.createInstanceFor[MailboxType](fqcn, args).recover({
-          case exception ⇒
-            throw new IllegalArgumentException(
-              ("Cannot instantiate MailboxType [%s], defined in [%s], " +
-                "make sure it has constructor with [akka.actor.ActorSystem.Settings, com.typesafe.config.Config] parameters")
-                .format(fqcn, config.getString("id")), exception)
-        }).get
-    }
-  }
-
-  /**
-   * Was the mailbox type configured or derived?
-   */
-  def mailBoxTypeConfigured: Boolean = config.getString("mailbox-type") != Deploy.NoMailboxGiven
-
   def configureExecutor(): ExecutorServiceConfigurator = {
-    config.getString("executor") match {
+    def configurator(executor: String): ExecutorServiceConfigurator = executor match {
       case null | "" | "fork-join-executor" ⇒ new ForkJoinExecutorConfigurator(config.getConfig("fork-join-executor"), prerequisites)
       case "thread-pool-executor"           ⇒ new ThreadPoolExecutorConfigurator(config.getConfig("thread-pool-executor"), prerequisites)
+      case "affinity-pool-executor"         ⇒ new AffinityPoolConfigurator(config.getConfig("affinity-pool-executor"), prerequisites)
+
       case fqcn ⇒
         val args = List(
-          classOf[Config] -> config,
-          classOf[DispatcherPrerequisites] -> prerequisites)
+          classOf[Config] → config,
+          classOf[DispatcherPrerequisites] → prerequisites)
         prerequisites.dynamicAccess.createInstanceFor[ExecutorServiceConfigurator](fqcn, args).recover({
           case exception ⇒ throw new IllegalArgumentException(
             ("""Cannot instantiate ExecutorServiceConfigurator ("executor = [%s]"), defined in [%s],
                 make sure it has an accessible constructor with a [%s,%s] signature""")
               .format(fqcn, config.getString("id"), classOf[Config], classOf[DispatcherPrerequisites]), exception)
         }).get
+    }
+
+    config.getString("executor") match {
+      case "default-executor" ⇒ new DefaultExecutorServiceConfigurator(config.getConfig("default-executor"), prerequisites, configurator(config.getString("default-executor.fallback")))
+      case other              ⇒ configurator(other)
     }
   }
 }
@@ -389,86 +354,54 @@ class ThreadPoolExecutorConfigurator(config: Config, prerequisites: DispatcherPr
 
   val threadPoolConfig: ThreadPoolConfig = createThreadPoolConfigBuilder(config, prerequisites).config
 
-  protected def createThreadPoolConfigBuilder(config: Config, prerequisites: DispatcherPrerequisites): ThreadPoolConfigBuilder = {
-    ThreadPoolConfigBuilder(ThreadPoolConfig())
-      .setKeepAliveTime(Duration(config getMilliseconds "keep-alive-time", TimeUnit.MILLISECONDS))
-      .setAllowCoreThreadTimeout(config getBoolean "allow-core-timeout")
-      .setCorePoolSizeFromFactor(config getInt "core-pool-size-min", config getDouble "core-pool-size-factor", config getInt "core-pool-size-max")
-      .setMaxPoolSizeFromFactor(config getInt "max-pool-size-min", config getDouble "max-pool-size-factor", config getInt "max-pool-size-max")
-      .configure(
-        Some(config getInt "task-queue-size") flatMap {
-          case size if size > 0 ⇒
-            Some(config getString "task-queue-type") map {
-              case "array"       ⇒ ThreadPoolConfig.arrayBlockingQueue(size, false) //TODO config fairness?
-              case "" | "linked" ⇒ ThreadPoolConfig.linkedBlockingQueue(size)
-              case x             ⇒ throw new IllegalArgumentException("[%s] is not a valid task-queue-type [array|linked]!" format x)
-            } map { qf ⇒ (q: ThreadPoolConfigBuilder) ⇒ q.setQueueFactory(qf) }
-          case _ ⇒ None
-        })
+  protected def createThreadPoolConfigBuilder(config: Config, @unused prerequisites: DispatcherPrerequisites): ThreadPoolConfigBuilder = {
+    import akka.util.Helpers.ConfigOps
+    val builder =
+      ThreadPoolConfigBuilder(ThreadPoolConfig())
+        .setKeepAliveTime(config.getMillisDuration("keep-alive-time"))
+        .setAllowCoreThreadTimeout(config getBoolean "allow-core-timeout")
+        .configure(
+          Some(config getInt "task-queue-size") flatMap {
+            case size if size > 0 ⇒
+              Some(config getString "task-queue-type") map {
+                case "array"       ⇒ ThreadPoolConfig.arrayBlockingQueue(size, false) //TODO config fairness?
+                case "" | "linked" ⇒ ThreadPoolConfig.linkedBlockingQueue(size)
+                case x             ⇒ throw new IllegalArgumentException("[%s] is not a valid task-queue-type [array|linked]!" format x)
+              } map { qf ⇒ (q: ThreadPoolConfigBuilder) ⇒ q.setQueueFactory(qf) }
+            case _ ⇒ None
+          })
+
+    if (config.getString("fixed-pool-size") == "off")
+      builder
+        .setCorePoolSizeFromFactor(config getInt "core-pool-size-min", config getDouble "core-pool-size-factor", config getInt "core-pool-size-max")
+        .setMaxPoolSizeFromFactor(config getInt "max-pool-size-min", config getDouble "max-pool-size-factor", config getInt "max-pool-size-max")
+    else
+      builder.setFixedPoolSize(config.getInt("fixed-pool-size"))
   }
 
   def createExecutorServiceFactory(id: String, threadFactory: ThreadFactory): ExecutorServiceFactory =
     threadPoolConfig.createExecutorServiceFactory(id, threadFactory)
 }
 
-object ForkJoinExecutorConfigurator {
+class DefaultExecutorServiceConfigurator(config: Config, prerequisites: DispatcherPrerequisites, fallback: ExecutorServiceConfigurator) extends ExecutorServiceConfigurator(config, prerequisites) {
+  val provider: ExecutorServiceFactoryProvider =
+    prerequisites.defaultExecutionContext match {
+      case Some(ec) ⇒
+        prerequisites.eventStream.publish(Debug("DefaultExecutorServiceConfigurator", this.getClass, s"Using passed in ExecutionContext as default executor for this ActorSystem. If you want to use a different executor, please specify one in akka.actor.default-dispatcher.default-executor."))
 
-  /**
-   * INTERNAL AKKA USAGE ONLY
-   */
-  final class AkkaForkJoinPool(parallelism: Int,
-                               threadFactory: ForkJoinPool.ForkJoinWorkerThreadFactory,
-                               unhandledExceptionHandler: Thread.UncaughtExceptionHandler)
-    extends ForkJoinPool(parallelism, threadFactory, unhandledExceptionHandler, true) with LoadMetrics {
-    override def execute(r: Runnable): Unit =
-      if (r eq null) throw new NullPointerException else super.execute(new AkkaForkJoinTask(r))
-
-    def atFullThrottle(): Boolean = this.getActiveThreadCount() >= this.getParallelism()
-  }
-
-  /**
-   * INTERNAL AKKA USAGE ONLY
-   */
-  @SerialVersionUID(1L)
-  final class AkkaForkJoinTask(runnable: Runnable) extends ForkJoinTask[Unit] {
-    override def getRawResult(): Unit = ()
-    override def setRawResult(unit: Unit): Unit = ()
-    final override def exec(): Boolean = try { runnable.run(); true } catch {
-      case anything: Throwable ⇒
-        val t = Thread.currentThread
-        t.getUncaughtExceptionHandler match {
-          case null ⇒
-          case some ⇒ some.uncaughtException(t, anything)
+        new AbstractExecutorService with ExecutorServiceFactory with ExecutorServiceFactoryProvider {
+          def createExecutorServiceFactory(id: String, threadFactory: ThreadFactory): ExecutorServiceFactory = this
+          def createExecutorService: ExecutorService = this
+          def shutdown(): Unit = ()
+          def isTerminated: Boolean = false
+          def awaitTermination(timeout: Long, unit: TimeUnit): Boolean = false
+          def shutdownNow(): ju.List[Runnable] = ju.Collections.emptyList()
+          def execute(command: Runnable): Unit = ec.execute(command)
+          def isShutdown: Boolean = false
         }
-        throw anything
+      case None ⇒ fallback
     }
-  }
-}
 
-class ForkJoinExecutorConfigurator(config: Config, prerequisites: DispatcherPrerequisites) extends ExecutorServiceConfigurator(config, prerequisites) {
-  import ForkJoinExecutorConfigurator._
-
-  def validate(t: ThreadFactory): ForkJoinPool.ForkJoinWorkerThreadFactory = t match {
-    case correct: ForkJoinPool.ForkJoinWorkerThreadFactory ⇒ correct
-    case x ⇒ throw new IllegalStateException("The prerequisites for the ForkJoinExecutorConfigurator is a ForkJoinPool.ForkJoinWorkerThreadFactory!")
-  }
-
-  class ForkJoinExecutorServiceFactory(val threadFactory: ForkJoinPool.ForkJoinWorkerThreadFactory,
-                                       val parallelism: Int) extends ExecutorServiceFactory {
-    def createExecutorService: ExecutorService = new AkkaForkJoinPool(parallelism, threadFactory, MonitorableThreadFactory.doNothing)
-  }
-  final def createExecutorServiceFactory(id: String, threadFactory: ThreadFactory): ExecutorServiceFactory = {
-    val tf = threadFactory match {
-      case m: MonitorableThreadFactory ⇒
-        // add the dispatcher id to the thread names
-        m.withName(m.name + "-" + id)
-      case other ⇒ other
-    }
-    new ForkJoinExecutorServiceFactory(
-      validate(tf),
-      ThreadPoolConfig.scaledPoolSize(
-        config.getInt("parallelism-min"),
-        config.getDouble("parallelism-factor"),
-        config.getInt("parallelism-max")))
-  }
+  def createExecutorServiceFactory(id: String, threadFactory: ThreadFactory): ExecutorServiceFactory =
+    provider.createExecutorServiceFactory(id, threadFactory)
 }

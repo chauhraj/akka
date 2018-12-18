@@ -1,22 +1,25 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.actor
 
-import akka.actor.dungeon.ChildrenContainer
-import akka.dispatch.Envelope
-import akka.dispatch.NullMessage
-import akka.dispatch.sysmsg._
-import akka.event.Logging.{ LogEvent, Debug, Error }
-import akka.japi.Procedure
-import java.io.{ ObjectOutputStream, NotSerializableException }
+import java.io.{ NotSerializableException, ObjectOutputStream }
+import java.util.concurrent.ThreadLocalRandom
+
 import scala.annotation.{ switch, tailrec }
 import scala.collection.immutable
-import scala.concurrent.ExecutionContext
+import scala.concurrent.ExecutionContextExecutor
 import scala.concurrent.duration.Duration
-import scala.concurrent.forkjoin.ThreadLocalRandom
 import scala.util.control.NonFatal
+import akka.actor.dungeon.ChildrenContainer
+import akka.dispatch.Envelope
+import akka.dispatch.sysmsg._
+import akka.event.Logging.{ Debug, Error, LogEvent }
+import akka.japi.Procedure
+import akka.dispatch.MessageDispatcher
+import akka.util.{ Reflect, unused }
+import akka.annotation.InternalApi
 
 /**
  * The actor context - the view of the actor cell from the actor.
@@ -43,22 +46,34 @@ import scala.util.control.NonFatal
  */
 trait ActorContext extends ActorRefFactory {
 
+  /**
+   * The ActorRef representing this actor
+   *
+   * This method is thread-safe and can be called from other threads than the ordinary
+   * actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
+   */
   def self: ActorRef
 
   /**
    * Retrieve the Props which were used to create this actor.
+   *
+   * This method is thread-safe and can be called from other threads than the ordinary
+   * actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def props: Props
 
   /**
    * Gets the current receive timeout.
-   * When specified, the receive method should be able to handle a 'ReceiveTimeout' message.
+   * When specified, the receive method should be able to handle a [[akka.actor.ReceiveTimeout]] message.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def receiveTimeout: Duration
 
   /**
-   * Defines the inactivity timeout after which the sending of a `ReceiveTimeout` message is triggered.
-   * When specified, the receive function should be able to handle a 'ReceiveTimeout' message.
+   * Defines the inactivity timeout after which the sending of a [[akka.actor.ReceiveTimeout]] message is triggered.
+   * When specified, the receive function should be able to handle a [[akka.actor.ReceiveTimeout]] message.
    * 1 millisecond is the minimum supported timeout.
    *
    * Please note that the receive timeout might fire and enqueue the `ReceiveTimeout` message right after
@@ -67,8 +82,24 @@ trait ActorContext extends ActorRefFactory {
    *
    * Once set, the receive timeout stays in effect (i.e. continues firing repeatedly after inactivity
    * periods). Pass in `Duration.Undefined` to switch off this feature.
+   *
+   * Messages marked with [[NotInfluenceReceiveTimeout]] will not reset the timer. This can be useful when
+   * `ReceiveTimeout` should be fired by external inactivity but not influenced by internal activity,
+   * e.g. scheduled tick messages.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def setReceiveTimeout(timeout: Duration): Unit
+
+  /**
+   * Changes the Actor's behavior to become the new 'Receive' (PartialFunction[Any, Unit]) handler.
+   * Replaces the current behavior on the top of the behavior stack.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
+   */
+  def become(behavior: Actor.Receive): Unit = become(behavior, discardOld = true)
 
   /**
    * Changes the Actor's behavior to become the new 'Receive' (PartialFunction[Any, Unit]) handler.
@@ -77,21 +108,30 @@ trait ActorContext extends ActorRefFactory {
    *  - if `discardOld = true` it will replace the top element (i.e. the current behavior)
    *  - if `discardOld = false` it will keep the current behavior and push the given one atop
    *
-   * The default of replacing the current behavior has been chosen to avoid memory leaks in
-   * case client code is written without consulting this documentation first (i.e. always pushing
-   * new closures and never issuing an `unbecome()`)
+   * The default of replacing the current behavior on the stack has been chosen to avoid memory
+   * leaks in case client code is written without consulting this documentation first (i.e.
+   * always pushing new behaviors and never issuing an `unbecome()`)
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
-  def become(behavior: Actor.Receive, discardOld: Boolean = true): Unit
+  def become(behavior: Actor.Receive, discardOld: Boolean): Unit
 
   /**
-   * Reverts the Actor behavior to the previous one in the hotswap stack.
+   * Reverts the Actor behavior to the previous one on the behavior stack.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def unbecome(): Unit
 
   /**
    * Returns the sender 'ActorRef' of the current message.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
-  def sender: ActorRef
+  def sender(): ActorRef
 
   /**
    * Returns all supervised children; this method returns a view (i.e. a lazy
@@ -103,49 +143,93 @@ trait ActorContext extends ActorRefFactory {
    * // should better be expressed as:
    * val goodLookup = context.child("kid")
    * }}}
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def children: immutable.Iterable[ActorRef]
 
   /**
    * Get the child with the given name if it exists.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def child(name: String): Option[ActorRef]
 
   /**
    * Returns the dispatcher (MessageDispatcher) that is used for this Actor.
-   * Importing this member will place a implicit MessageDispatcher in scope.
+   * Importing this member will place an implicit ExecutionContext in scope.
+   *
+   * This method is thread-safe and can be called from other threads than the ordinary
+   * actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
-  implicit def dispatcher: ExecutionContext
+  implicit def dispatcher: ExecutionContextExecutor
 
   /**
    * The system that the actor belongs to.
-   * Importing this member will place a implicit MessageDispatcher in scope.
+   * Importing this member will place an implicit ActorSystem in scope.
+   *
+   * This method is thread-safe and can be called from other threads than the ordinary
+   * actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   implicit def system: ActorSystem
 
   /**
    * Returns the supervising parent ActorRef.
+   *
+   * This method is thread-safe and can be called from other threads than the ordinary
+   * actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def parent: ActorRef
 
   /**
    * Registers this actor as a Monitor for the provided ActorRef.
-   * This actor will receive a Terminated(watched) message when watched
-   * is terminated.
+   * This actor will receive a Terminated(subject) message when watched
+   * actor is terminated.
+   *
+   * `watch` is idempotent if it is not mixed with `watchWith`.
+   *
+   * It will fail with an [[IllegalStateException]] if the same subject was watched before using `watchWith`.
+   * To clear the termination message, unwatch first.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
+   *
    * @return the provided ActorRef
    */
   def watch(subject: ActorRef): ActorRef
 
   /**
+   * Registers this actor as a Monitor for the provided ActorRef.
+   * This actor will receive the specified message when watched
+   * actor is terminated.
+   *
+   * `watchWith` is idempotent if it is called with the same `msg` and not mixed with `watch`.
+   *
+   * It will fail with an [[IllegalStateException]] if the same subject was watched before using `watch` or `watchWith` with
+   * another termination message. To change the termination message, unwatch first.
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
+   *
+   * @return the provided ActorRef
+   */
+  def watchWith(subject: ActorRef, msg: Any): ActorRef
+
+  /**
    * Unregisters this actor as Monitor for the provided ActorRef.
    * @return the provided ActorRef
+   *
+   * *Warning*: This method is not thread-safe and must not be accessed from threads other
+   * than the ordinary actor message processing thread, such as [[java.util.concurrent.CompletionStage]] and [[scala.concurrent.Future]] callbacks.
    */
   def unwatch(subject: ActorRef): ActorRef
 
   /**
    * ActorContexts shouldn't be Serializable
    */
-  final protected def writeObject(o: ObjectOutputStream): Unit =
+  final protected def writeObject(@unused o: ObjectOutputStream): Unit =
     throw new NotSerializableException("ActorContext is not serializable!")
 }
 
@@ -153,6 +237,7 @@ trait ActorContext extends ActorRefFactory {
  * UntypedActorContext is the UntypedActor equivalent of ActorContext,
  * containing the Java API
  */
+@deprecated("Use AbstractActor.ActorContext instead of UntypedActorContext.", since = "2.5.0")
 trait UntypedActorContext extends ActorContext {
 
   /**
@@ -169,7 +254,7 @@ trait UntypedActorContext extends ActorContext {
 
   /**
    * Changes the Actor's behavior to become the new 'Procedure' handler.
-   * Replaces the current behavior at the top of the hotswap stack.
+   * Replaces the current behavior on the top of the behavior stack.
    */
   def become(behavior: Procedure[Any]): Unit
 
@@ -180,9 +265,9 @@ trait UntypedActorContext extends ActorContext {
    *  - if `discardOld = true` it will replace the top element (i.e. the current behavior)
    *  - if `discardOld = false` it will keep the current behavior and push the given one atop
    *
-   * The default of replacing the current behavior has been chosen to avoid memory leaks in
-   * case client code is written without consulting this documentation first (i.e. always pushing
-   * new closures and never issuing an `unbecome()`)
+   * The default of replacing the current behavior on the stack has been chosen to avoid memory
+   * leaks in case client code is written without consulting this documentation first (i.e.
+   * always pushing new behaviors and never issuing an `unbecome()`)
    */
   def become(behavior: Procedure[Any], discardOld: Boolean): Unit
 
@@ -191,6 +276,7 @@ trait UntypedActorContext extends ActorContext {
 /**
  * INTERNAL API
  */
+@InternalApi
 private[akka] trait Cell {
   /**
    * The “self” reference which this Cell is attached to.
@@ -229,7 +315,7 @@ private[akka] trait Cell {
    * Returns “true” if the actor is locally known to be terminated, “false” if
    * alive or uncertain.
    */
-  def isTerminated: Boolean
+  private[akka] def isTerminated: Boolean
   /**
    * The supervisor of this actor.
    */
@@ -242,6 +328,12 @@ private[akka] trait Cell {
    * Get the stats for the named child, if that exists.
    */
   def getChildByName(name: String): Option[ChildStats]
+
+  /**
+   * Method for looking up a single child beneath this actor.
+   * It is racy if called from the outside.
+   */
+  def getSingleChild(name: String): InternalActorRef
 
   /**
    * Enqueue a message to be sent to the actor; may or may not actually
@@ -302,10 +394,9 @@ private[akka] object ActorCell {
 
   final val emptyBehaviorStack: List[Actor.Receive] = Nil
 
-  final val emptyActorRefSet: Set[ActorRef] = immutable.TreeSet.empty
-  final val emptyActorRefMap: Map[ActorPath, ActorRef] = immutable.TreeMap.empty
+  final val emptyActorRefSet: Set[ActorRef] = immutable.HashSet.empty
 
-  final val terminatedProps: Props = Props(() ⇒ throw new IllegalActorStateException("This Actor has been terminated"))
+  final val terminatedProps: Props = Props((throw IllegalActorStateException("This Actor has been terminated")): Actor)
 
   final val undefinedUid = 0
 
@@ -328,7 +419,7 @@ private[akka] object ActorCell {
   final val SuspendedWaitForChildrenState = 2
 }
 
-//ACTORCELL IS 64bytes and should stay that way unless very good reason not to (machine sympathy, cache line fit)
+//ACTORCELL is NOT 64 bytes aligned, unless it is demonstrated to have a large improvement on performance
 //vars don't need volatile since it's protected with the mailbox status
 //Make sure that they are not read/written outside of a message processing (systemInvoke/invoke)
 /**
@@ -337,11 +428,12 @@ private[akka] object ActorCell {
  * for! (waves hand)
  */
 private[akka] class ActorCell(
-  val system: ActorSystemImpl,
-  val self: InternalActorRef,
-  val props: Props,
-  val parent: InternalActorRef)
-  extends UntypedActorContext with Cell
+  val system:      ActorSystemImpl,
+  val self:        InternalActorRef,
+  final val props: Props, // Must be final so that it can be properly cleared in clearActorCellFields
+  val dispatcher:  MessageDispatcher,
+  val parent:      InternalActorRef)
+  extends UntypedActorContext with AbstractActor.ActorContext with Cell
   with dungeon.ReceiveTimeout
   with dungeon.Children
   with dungeon.Dispatch
@@ -364,6 +456,11 @@ private[akka] class ActorCell(
   var currentMessage: Envelope = _
   private var behaviorStack: List[Actor.Receive] = emptyBehaviorStack
   private[this] var sysmsgStash: LatestFirstSystemMessageList = SystemMessageList.LNil
+
+  // Java API
+  final def getParent() = parent
+  // Java API
+  final def getSystem() = system
 
   protected def stash(msg: SystemMessage): Unit = {
     assert(msg.unlinked)
@@ -422,7 +519,7 @@ private[akka] class ActorCell(
           case message: SystemMessage if shouldStash(message, currentState) ⇒ stash(message)
           case f: Failed ⇒ handleFailure(f)
           case DeathWatchNotification(a, ec, at) ⇒ watchedActorTerminated(a, ec, at)
-          case Create() ⇒ create()
+          case Create(failure) ⇒ create(failure)
           case Watch(watchee, watcher) ⇒ addWatcher(watchee, watcher)
           case Unwatch(watchee, watcher) ⇒ remWatcher(watchee, watcher)
           case Recreate(cause) ⇒ faultRecreate(cause)
@@ -448,61 +545,52 @@ private[akka] class ActorCell(
   }
 
   //Memory consistency is handled by the Mailbox (reading mailbox status then processing messages, then writing mailbox status
-  final def invoke(messageHandle: Envelope): Unit = try {
-    currentMessage = messageHandle
-    cancelReceiveTimeout() // FIXME: leave this here???
-    messageHandle.message match {
-      case msg: AutoReceivedMessage ⇒ autoReceiveMessage(messageHandle)
-      case msg                      ⇒ receiveMessage(msg)
+  final def invoke(messageHandle: Envelope): Unit = {
+    val influenceReceiveTimeout = !messageHandle.message.isInstanceOf[NotInfluenceReceiveTimeout]
+    try {
+      currentMessage = messageHandle
+      if (influenceReceiveTimeout)
+        cancelReceiveTimeout()
+      messageHandle.message match {
+        case _: AutoReceivedMessage ⇒ autoReceiveMessage(messageHandle)
+        case msg                    ⇒ receiveMessage(msg)
+      }
+      currentMessage = null // reset current message after successful invocation
+    } catch handleNonFatalOrInterruptedException { e ⇒
+      handleInvokeFailure(Nil, e)
+    } finally {
+      // Schedule or reschedule receive timeout
+      checkReceiveTimeout(reschedule = influenceReceiveTimeout)
     }
-    currentMessage = null // reset current message after successful invocation
-  } catch handleNonFatalOrInterruptedException { e ⇒
-    handleInvokeFailure(Nil, e)
-  } finally {
-    checkReceiveTimeout // Reschedule receive timeout
   }
 
-  def autoReceiveMessage(msg: Envelope): Unit =
-    if (msg.message != NullMessage) {
-      if (system.settings.DebugAutoReceive)
-        publish(Debug(self.path.toString, clazz(actor), "received AutoReceiveMessage " + msg))
+  def autoReceiveMessage(msg: Envelope): Unit = {
+    if (system.settings.DebugAutoReceive)
+      publish(Debug(self.path.toString, clazz(actor), "received AutoReceiveMessage " + msg))
 
-      msg.message match {
-        case t: Terminated              ⇒ receivedTerminated(t)
-        case AddressTerminated(address) ⇒ addressTerminated(address)
-        case Kill                       ⇒ throw new ActorKilledException("Kill")
-        case PoisonPill                 ⇒ self.stop()
-        case SelectParent(m) ⇒
-          if (self == system.provider.rootGuardian) self.tell(m, msg.sender)
-          else parent.tell(m, msg.sender)
-        case s @ SelectChildName(name, m) ⇒
-          def selectChild(): Unit = {
-            getChildByName(name) match {
-              case Some(c: ChildRestartStats) ⇒ c.child.tell(m, msg.sender)
-              case _ ⇒
-                s.identifyRequest foreach { x ⇒ sender ! ActorIdentity(x.messageId, None) }
-            }
-          }
-          // need this special case because of extraNames handled by rootGuardian
-          if (self == system.provider.rootGuardian) {
-            self.asInstanceOf[LocalActorRef].getSingleChild(name) match {
-              case Nobody ⇒ selectChild()
-              case child  ⇒ child.tell(m, msg.sender)
-            }
-          } else
-            selectChild()
-        case SelectChildPattern(p, m) ⇒ for (c ← children if p.matcher(c.path.name).matches) c.tell(m, msg.sender)
-        case Identify(messageId)      ⇒ sender ! ActorIdentity(messageId, Some(self))
-      }
+    msg.message match {
+      case t: Terminated              ⇒ receivedTerminated(t)
+      case AddressTerminated(address) ⇒ addressTerminated(address)
+      case Kill                       ⇒ throw ActorKilledException("Kill")
+      case PoisonPill                 ⇒ self.stop()
+      case sel: ActorSelectionMessage ⇒ receiveSelection(sel)
+      case Identify(messageId)        ⇒ sender() ! ActorIdentity(messageId, Some(self))
     }
+  }
 
-  final def receiveMessage(msg: Any): Unit = behaviorStack.head.applyOrElse(msg, actor.unhandled)
+  private def receiveSelection(sel: ActorSelectionMessage): Unit =
+    if (sel.elements.isEmpty)
+      invoke(Envelope(sel.msg, sender(), system))
+    else
+      ActorSelection.deliverSelection(self, sender(), sel)
+
+  final def receiveMessage(msg: Any): Unit = actor.aroundReceive(behaviorStack.head, msg)
 
   /*
    * ACTOR CONTEXT IMPLEMENTATION
    */
 
-  final def sender: ActorRef = currentMessage match {
+  final def sender(): ActorRef = currentMessage match {
     case null                      ⇒ system.deadLetters
     case msg if msg.sender ne null ⇒ msg.sender
     case _                         ⇒ system.deadLetters
@@ -511,7 +599,7 @@ private[akka] class ActorCell(
   def become(behavior: Actor.Receive, discardOld: Boolean = true): Unit =
     behaviorStack = behavior :: (if (discardOld && behaviorStack.nonEmpty) behaviorStack.tail else behaviorStack)
 
-  def become(behavior: Procedure[Any]): Unit = become(behavior, false)
+  def become(behavior: Procedure[Any]): Unit = become(behavior, discardOld = true)
 
   def become(behavior: Procedure[Any], discardOld: Boolean): Unit =
     become({ case msg ⇒ behavior.apply(msg) }: Actor.Receive, discardOld)
@@ -547,18 +635,21 @@ private[akka] class ActorCell(
     }
   }
 
-  protected def create(): Unit = {
+  protected def create(failure: Option[ActorInitializationException]): Unit = {
     def clearOutActorIfNonNull(): Unit = {
       if (actor != null) {
-        clearActorFields(actor)
+        clearActorFields(actor, recreate = false)
         actor = null // ensure that we know that we failed during creation
       }
     }
+
+    failure foreach { throw _ }
+
     try {
       val created = newActor()
       actor = created
-      created.preStart()
-      checkReceiveTimeout
+      created.aroundPreStart()
+      checkReceiveTimeout()
       if (system.settings.DebugLifecycle) publish(Debug(self.path.toString, clazz(created), "started (" + created + ")"))
     } catch {
       case e: InterruptedException ⇒
@@ -568,9 +659,10 @@ private[akka] class ActorCell(
       case NonFatal(e) ⇒
         clearOutActorIfNonNull()
         e match {
-          case i: InstantiationException ⇒ throw ActorInitializationException(self,
+          case i: InstantiationException ⇒ throw ActorInitializationException(
+            self,
             """exception during creation, this problem is likely to occur because the class of the Actor you tried to create is either,
-               a non-static inner class (in which case make it a static inner class or use Props(new ...) or Props( new UntypedActorFactory ... )
+               a non-static inner class (in which case make it a static inner class or use Props(new ...) or Props( new Creator ... )
                or is missing an appropriate, reachable no-args constructor.
               """, i.getCause)
           case x ⇒ throw ActorInitializationException(self, "exception during creation", x)
@@ -582,7 +674,7 @@ private[akka] class ActorCell(
     if (!isTerminating) {
       // Supervise is the first thing we get from a new child, so store away the UID for later use in handleFailure()
       initChild(child) match {
-        case Some(crs) ⇒
+        case Some(_) ⇒
           handleSupervise(child, async)
           if (system.settings.DebugLifecycle) publish(Debug(self.path.toString, clazz(actor), "now supervising " + child))
         case None ⇒ publish(Error(self.path.toString, clazz(actor), "received Supervise from unregistered child " + child + ", this will not end well"))
@@ -591,40 +683,27 @@ private[akka] class ActorCell(
 
   // future extension point
   protected def handleSupervise(child: ActorRef, async: Boolean): Unit = child match {
-    case r: RepointableActorRef if async ⇒ r.point()
+    case r: RepointableActorRef if async ⇒ r.point(catchFailures = true)
     case _                               ⇒
-  }
-
-  @tailrec private final def lookupAndSetField(clazz: Class[_], instance: AnyRef, name: String, value: Any): Boolean = {
-    if (try {
-      val field = clazz.getDeclaredField(name)
-      field.setAccessible(true)
-      field.set(instance, value)
-      true
-    } catch {
-      case e: NoSuchFieldException ⇒ false
-    }) true
-    else if (clazz.getSuperclass eq null) false
-    else lookupAndSetField(clazz.getSuperclass, instance, name, value)
   }
 
   final protected def clearActorCellFields(cell: ActorCell): Unit = {
     cell.unstashAll()
-    if (!lookupAndSetField(cell.getClass, cell, "props", ActorCell.terminatedProps))
+    if (!Reflect.lookupAndSetField(classOf[ActorCell], cell, "props", ActorCell.terminatedProps))
       throw new IllegalArgumentException("ActorCell has no props field")
   }
 
-  final protected def clearActorFields(actorInstance: Actor): Unit = {
-    setActorFields(actorInstance, context = null, self = system.deadLetters)
+  final protected def clearActorFields(actorInstance: Actor, recreate: Boolean): Unit = {
+    setActorFields(actorInstance, context = null, self = if (recreate) self else system.deadLetters)
     currentMessage = null
     behaviorStack = emptyBehaviorStack
   }
 
   final protected def setActorFields(actorInstance: Actor, context: ActorContext, self: ActorRef): Unit =
     if (actorInstance ne null) {
-      if (!lookupAndSetField(actorInstance.getClass, actorInstance, "context", context)
-        || !lookupAndSetField(actorInstance.getClass, actorInstance, "self", self))
-        throw new IllegalActorStateException(actorInstance.getClass + " is not an Actor since it have not mixed in the 'Actor' trait")
+      if (!Reflect.lookupAndSetField(actorInstance.getClass, actorInstance, "context", context)
+        || !Reflect.lookupAndSetField(actorInstance.getClass, actorInstance, "self", self))
+        throw IllegalActorStateException(actorInstance.getClass + " is not an Actor since it have not mixed in the 'Actor' trait")
     }
 
   // logging is not the main purpose, and if it fails there’s nothing we can do
@@ -632,4 +711,3 @@ private[akka] class ActorCell(
 
   protected final def clazz(o: AnyRef): Class[_] = if (o eq null) this.getClass else o.getClass
 }
-

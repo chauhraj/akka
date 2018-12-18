@@ -1,19 +1,25 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.routing
 
 import language.postfixOps
-
-import java.util.concurrent.atomic.AtomicInteger
-import org.junit.runner.RunWith
-import akka.actor.{ Props, Deploy, Actor, ActorRef }
-import akka.ConfigurationException
 import scala.concurrent.Await
-import akka.pattern.{ ask, gracefulStop }
-import akka.testkit.{ TestLatch, ImplicitSender, DefaultTimeout, AkkaSpec }
 import scala.concurrent.duration._
+import scala.collection.immutable
+import akka.ConfigurationException
+import akka.actor.{ Props, Deploy, Actor, ActorRef }
 import akka.actor.UnstartedCell
+import akka.testkit.{ ImplicitSender, DefaultTimeout, AkkaSpec }
+import akka.pattern.gracefulStop
+import com.typesafe.config.Config
+import akka.actor.ActorSystem
+import akka.testkit.TestProbe
+import akka.testkit.TestProbe
+import akka.actor.ExtendedActorSystem
+import akka.testkit.TestActors.echoActorProps
+import akka.actor.ActorPath
 
 object ConfiguredLocalRoutingSpec {
   val config = """
@@ -28,27 +34,76 @@ object ConfiguredLocalRoutingSpec {
         }
         deployment {
           /config {
-            router = random
+            router = random-pool
             nr-of-instances = 4
+            pool-dispatcher {
+              fork-join-executor.parallelism-min = 4
+              fork-join-executor.parallelism-max = 4
+            }
+          }
+          /paths {
+            router = random-group
+            routees.paths = ["/user/service1", "/user/service2"]
           }
           /weird {
-            router = round-robin
+            router = round-robin-pool
             nr-of-instances = 3
           }
           "/weird/*" {
-            router = round-robin
+            router = round-robin-pool
             nr-of-instances = 2
+          }
+          /myrouter {
+            router = "akka.routing.ConfiguredLocalRoutingSpec$MyRouter"
+            foo = bar
+          }
+          /sys-parent/round {
+            router = round-robin-pool
+            nr-of-instances = 6
           }
         }
       }
     }
   """
+
+  class MyRouter(config: Config) extends CustomRouterConfig {
+    override def createRouter(system: ActorSystem): Router = Router(MyRoutingLogic(config))
+  }
+
+  final case class MyRoutingLogic(config: Config) extends RoutingLogic {
+    override def select(message: Any, routees: immutable.IndexedSeq[Routee]): Routee =
+      MyRoutee(config.getString(message.toString))
+  }
+
+  final case class MyRoutee(reply: String) extends Routee {
+    override def send(message: Any, sender: ActorRef): Unit =
+      sender ! reply
+  }
+
+  class EchoProps extends Actor {
+    def receive = {
+      case "get" ⇒ sender() ! context.props
+    }
+  }
+
+  class SendRefAtStartup(testActor: ActorRef) extends Actor {
+    testActor ! self
+    def receive = { case _ ⇒ }
+  }
+
+  class Parent extends Actor {
+    def receive = {
+      case (p: Props, name: String) ⇒
+        sender() ! context.actorOf(p, name)
+    }
+  }
+
 }
 
-@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class ConfiguredLocalRoutingSpec extends AkkaSpec(ConfiguredLocalRoutingSpec.config) with DefaultTimeout with ImplicitSender {
+  import ConfiguredLocalRoutingSpec._
 
-  def routerConfig(ref: ActorRef): RouterConfig = ref match {
+  def routerConfig(ref: ActorRef): akka.routing.RouterConfig = ref match {
     case r: RoutedActorRef ⇒
       r.underlying match {
         case c: RoutedActorCell ⇒ c.routerConfig
@@ -56,233 +111,82 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec(ConfiguredLocalRoutingSpec.con
       }
   }
 
+  def collectRouteePaths(probe: TestProbe, router: ActorRef, n: Int): immutable.Seq[ActorPath] = {
+    for (i ← 1 to n) yield {
+      val msg = i.toString
+      router.tell(msg, probe.ref)
+      probe.expectMsg(msg)
+      probe.lastSender.path
+    }
+  }
+
   "RouterConfig" must {
 
     "be picked up from Props" in {
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "get" ⇒ sender ! context.props
-        }
-      }).withRouter(RoundRobinRouter(12)), "someOther")
-      routerConfig(actor) must be === RoundRobinRouter(12)
+      val actor = system.actorOf(RoundRobinPool(12).props(routeeProps = Props[EchoProps]), "someOther")
+      routerConfig(actor) should ===(RoundRobinPool(12))
       Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "be overridable in config" in {
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "get" ⇒ sender ! context.props
-        }
-      }).withRouter(RoundRobinRouter(12)), "config")
-      routerConfig(actor) must be === RandomRouter(4)
+      val actor = system.actorOf(RoundRobinPool(12).props(routeeProps = Props[EchoProps]), "config")
+      routerConfig(actor) should ===(RandomPool(nrOfInstances = 4, usePoolDispatcher = true))
+      Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
+    }
+
+    "use routees.paths from config" in {
+      val actor = system.actorOf(RandomPool(12).props(routeeProps = Props[EchoProps]), "paths")
+      routerConfig(actor) should ===(RandomGroup(List("/user/service1", "/user/service2")))
       Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "be overridable in explicit deployment" in {
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "get" ⇒ sender ! context.props
-        }
-      }).withRouter(FromConfig).withDeploy(Deploy(routerConfig = RoundRobinRouter(12))), "someOther")
-      routerConfig(actor) must be === RoundRobinRouter(12)
+      val actor = system.actorOf(FromConfig.props(routeeProps = Props[EchoProps]).
+        withDeploy(Deploy(routerConfig = RoundRobinPool(12))), "someOther")
+      routerConfig(actor) should ===(RoundRobinPool(12))
       Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "be overridable in config even with explicit deployment" in {
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "get" ⇒ sender ! context.props
-        }
-      }).withRouter(FromConfig).withDeploy(Deploy(routerConfig = RoundRobinRouter(12))), "config")
-      routerConfig(actor) must be === RandomRouter(4)
+      val actor = system.actorOf(FromConfig.props(routeeProps = Props[EchoProps]).
+        withDeploy(Deploy(routerConfig = RoundRobinPool(12))), "config")
+      routerConfig(actor) should ===(RandomPool(nrOfInstances = 4, usePoolDispatcher = true))
       Await.result(gracefulStop(actor, 3 seconds), 3 seconds)
     }
 
     "fail with an exception if not correct" in {
       intercept[ConfigurationException] {
-        system.actorOf(Props.empty.withRouter(FromConfig))
+        system.actorOf(FromConfig.props())
       }
     }
 
     "not get confused when trying to wildcard-configure children" in {
-      val router = system.actorOf(Props(new Actor {
-        testActor ! self
-        def receive = { case _ ⇒ }
-      }).withRouter(FromConfig), "weird")
+      system.actorOf(FromConfig.props(routeeProps = Props(classOf[SendRefAtStartup], testActor)), "weird")
       val recv = Set() ++ (for (_ ← 1 to 3) yield expectMsgType[ActorRef])
       val expc = Set('a', 'b', 'c') map (i ⇒ system.actorFor("/user/weird/$" + i))
-      recv must be(expc)
-      expectNoMsg(1 second)
+      recv should ===(expc)
+      expectNoMessage(1 second)
+    }
+
+    "support custom router" in {
+      val myrouter = system.actorOf(FromConfig.props(), "myrouter")
+      myrouter ! "foo"
+      expectMsg("bar")
+    }
+
+    "load settings from config for local child router of system actor" in {
+      // we don't really support deployment configuration of system actors, but
+      // it's used for the pool of the SimpleDnsManager "/IO-DNS/inet-address"
+      val probe = TestProbe()
+      val parent = system.asInstanceOf[ExtendedActorSystem].systemActorOf(Props[Parent], "sys-parent")
+      parent.tell((FromConfig.props(echoActorProps), "round"), probe.ref)
+      val router = probe.expectMsgType[ActorRef]
+      val replies = collectRouteePaths(probe, router, 10)
+      val children = replies.toSet
+      children should have size 6
+      system.stop(router)
     }
 
   }
 
-  "round robin router" must {
-
-    "be able to shut down its instance" in {
-      val helloLatch = new TestLatch(5)
-      val stopLatch = new TestLatch(5)
-
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "hello" ⇒ helloLatch.countDown()
-        }
-
-        override def postStop() {
-          stopLatch.countDown()
-        }
-      }).withRouter(RoundRobinRouter(5)), "round-robin-shutdown")
-
-      actor ! "hello"
-      actor ! "hello"
-      actor ! "hello"
-      actor ! "hello"
-      actor ! "hello"
-      Await.ready(helloLatch, 5 seconds)
-
-      system.stop(actor)
-      Await.ready(stopLatch, 5 seconds)
-    }
-
-    "deliver messages in a round robin fashion" in {
-      val connectionCount = 10
-      val iterationCount = 10
-      val doneLatch = new TestLatch(connectionCount)
-
-      val counter = new AtomicInteger
-      var replies = Map.empty[Int, Int]
-      for (i ← 0 until connectionCount) {
-        replies += i -> 0
-      }
-
-      val actor = system.actorOf(Props(new Actor {
-        lazy val id = counter.getAndIncrement()
-        def receive = {
-          case "hit" ⇒ sender ! id
-          case "end" ⇒ doneLatch.countDown()
-        }
-      }).withRouter(RoundRobinRouter(connectionCount)), "round-robin")
-
-      for (i ← 0 until iterationCount) {
-        for (k ← 0 until connectionCount) {
-          val id = Await.result((actor ? "hit").mapTo[Int], timeout.duration)
-          replies = replies + (id -> (replies(id) + 1))
-        }
-      }
-
-      counter.get must be(connectionCount)
-
-      actor ! Broadcast("end")
-      Await.ready(doneLatch, 5 seconds)
-
-      replies.values foreach { _ must be(iterationCount) }
-    }
-
-    "deliver a broadcast message using the !" in {
-      val helloLatch = new TestLatch(5)
-      val stopLatch = new TestLatch(5)
-
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "hello" ⇒ helloLatch.countDown()
-        }
-
-        override def postStop() {
-          stopLatch.countDown()
-        }
-      }).withRouter(RoundRobinRouter(5)), "round-robin-broadcast")
-
-      actor ! Broadcast("hello")
-      Await.ready(helloLatch, 5 seconds)
-
-      system.stop(actor)
-      Await.ready(stopLatch, 5 seconds)
-    }
-  }
-
-  "random router" must {
-
-    "be able to shut down its instance" in {
-      val stopLatch = new TestLatch(7)
-
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "hello" ⇒ sender ! "world"
-        }
-
-        override def postStop() {
-          stopLatch.countDown()
-        }
-      }).withRouter(RandomRouter(7)), "random-shutdown")
-
-      actor ! "hello"
-      actor ! "hello"
-      actor ! "hello"
-      actor ! "hello"
-      actor ! "hello"
-
-      within(2 seconds) {
-        for (i ← 1 to 5) expectMsg("world")
-      }
-
-      system.stop(actor)
-      Await.ready(stopLatch, 5 seconds)
-    }
-
-    "deliver messages in a random fashion" in {
-      val connectionCount = 10
-      val iterationCount = 100
-      val doneLatch = new TestLatch(connectionCount)
-
-      val counter = new AtomicInteger
-      var replies = Map.empty[Int, Int]
-      for (i ← 0 until connectionCount) {
-        replies = replies + (i -> 0)
-      }
-
-      val actor = system.actorOf(Props(new Actor {
-        lazy val id = counter.getAndIncrement()
-        def receive = {
-          case "hit" ⇒ sender ! id
-          case "end" ⇒ doneLatch.countDown()
-        }
-      }).withRouter(RandomRouter(connectionCount)), "random")
-
-      for (i ← 0 until iterationCount) {
-        for (k ← 0 until connectionCount) {
-          val id = Await.result((actor ? "hit").mapTo[Int], timeout.duration)
-          replies = replies + (id -> (replies(id) + 1))
-        }
-      }
-
-      counter.get must be(connectionCount)
-
-      actor ! Broadcast("end")
-      Await.ready(doneLatch, 5 seconds)
-
-      replies.values foreach { _ must be > (0) }
-      replies.values.sum must be === iterationCount * connectionCount
-    }
-
-    "deliver a broadcast message using the !" in {
-      val helloLatch = new TestLatch(6)
-      val stopLatch = new TestLatch(6)
-
-      val actor = system.actorOf(Props(new Actor {
-        def receive = {
-          case "hello" ⇒ helloLatch.countDown()
-        }
-
-        override def postStop() {
-          stopLatch.countDown()
-        }
-      }).withRouter(RandomRouter(6)), "random-broadcast")
-
-      actor ! Broadcast("hello")
-      Await.ready(helloLatch, 5 seconds)
-
-      system.stop(actor)
-      Await.ready(stopLatch, 5 seconds)
-    }
-  }
 }

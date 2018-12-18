@@ -1,13 +1,12 @@
-/**
- *  Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.cluster
 
 import language.postfixOps
 import scala.concurrent.duration._
 import com.typesafe.config.ConfigFactory
-import akka.actor.Actor
-import akka.actor.Props
 import akka.cluster.ClusterEvent.CurrentClusterState
 import akka.remote.testkit.MultiNodeConfig
 import akka.remote.testkit.MultiNodeSpec
@@ -21,7 +20,6 @@ object InitialHeartbeatMultiJvmSpec extends MultiNodeConfig {
 
   commonConfig(debugConfig(on = false).
     withFallback(ConfigFactory.parseString("""
-      akka.cluster.failure-detector.heartbeat-request.grace-period = 3 s
       akka.cluster.failure-detector.threshold = 4""")).
     withFallback(MultiNodeClusterSpec.clusterConfig))
 
@@ -43,26 +41,35 @@ abstract class InitialHeartbeatSpec
   "A member" must {
 
     "detect failure even though no heartbeats have been received" taggedAs LongRunningTest in {
+      val firstAddress = address(first)
       val secondAddress = address(second)
       awaitClusterUp(first)
 
       runOn(first) {
         within(10 seconds) {
-          awaitAssert {
+          awaitAssert({
             cluster.sendCurrentClusterState(testActor)
-            expectMsgType[CurrentClusterState].members.map(_.address) must contain(secondAddress)
-          }
+            expectMsgType[CurrentClusterState].members.map(_.address) should contain(secondAddress)
+          }, interval = 50.millis)
         }
       }
       runOn(second) {
         cluster.join(first)
+        within(10 seconds) {
+          awaitAssert({
+            cluster.sendCurrentClusterState(testActor)
+            expectMsgType[CurrentClusterState].members.map(_.address) should contain(firstAddress)
+          }, interval = 50.millis)
+        }
       }
       enterBarrier("second-joined")
 
       runOn(controller) {
-        // it is likely that first has not started sending heartbeats to second yet
-        // Direction must be Receive because the gossip from first to second must pass through
-        testConductor.blackhole(first, second, Direction.Receive).await
+        // It is likely that second has not started heartbeating to first yet,
+        // and when it does the messages doesn't go through and the first extra heartbeat is triggered.
+        // If the first heartbeat arrives, it will detect the failure anyway but not really exercise the
+        // part that we are trying to test here.
+        testConductor.blackhole(first, second, Direction.Both).await
       }
 
       runOn(second) {

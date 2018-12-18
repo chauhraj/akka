@@ -1,20 +1,24 @@
-/**
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
+
 package akka.testkit
 
-import language.{ postfixOps, reflectiveCalls }
+import org.scalactic.{ CanEqual, TypeCheckedTripleEquals }
 
-import org.scalatest.{ WordSpec, BeforeAndAfterAll, Tag }
-import org.scalatest.matchers.MustMatchers
-import akka.actor.{ Actor, Props, ActorSystem, PoisonPill, DeadLetter, ActorSystemImpl }
+import language.postfixOps
+import org.scalatest.{ BeforeAndAfterAll, WordSpecLike }
+import org.scalatest.Matchers
+import akka.actor.ActorSystem
 import akka.event.{ Logging, LoggingAdapter }
+
 import scala.concurrent.duration._
-import scala.concurrent.{ Await, Future }
+import scala.concurrent.Future
 import com.typesafe.config.{ Config, ConfigFactory }
-import java.util.concurrent.TimeoutException
 import akka.dispatch.Dispatchers
-import akka.pattern.ask
+import akka.testkit.TestEvent._
+import org.scalatest.concurrent.ScalaFutures
+import org.scalatest.time.{ Millis, Span }
 
 object AkkaSpec {
   val testConf: Config = ConfigFactory.parseString("""
@@ -41,7 +45,8 @@ object AkkaSpec {
   }
 
   def getCallerName(clazz: Class[_]): String = {
-    val s = Thread.currentThread.getStackTrace map (_.getClassName) drop 1 dropWhile (_ matches ".*AkkaSpec.?$")
+    val s = (Thread.currentThread.getStackTrace map (_.getClassName) drop 1)
+      .dropWhile(_ matches "(java.lang.Thread|.*AkkaSpec.*|.*\\.StreamSpec.*|.*MultiNodeSpec.*|.*\\.Abstract.*)")
     val reduced = s.lastIndexWhere(_ == clazz.getName) match {
       case -1 ⇒ s
       case z  ⇒ s drop (z + 1)
@@ -52,9 +57,13 @@ object AkkaSpec {
 }
 
 abstract class AkkaSpec(_system: ActorSystem)
-  extends TestKit(_system) with WordSpec with MustMatchers with BeforeAndAfterAll with WatchedByCoroner {
+  extends TestKit(_system) with WordSpecLike with Matchers with BeforeAndAfterAll with WatchedByCoroner
+  with TypeCheckedTripleEquals with ScalaFutures {
 
-  def this(config: Config) = this(ActorSystem(AkkaSpec.getCallerName(getClass),
+  implicit val patience = PatienceConfig(testKitSettings.DefaultTimeout.duration, Span(100, Millis))
+
+  def this(config: Config) = this(ActorSystem(
+    AkkaSpec.getCallerName(getClass),
     ConfigFactory.load(config.withFallback(AkkaSpec.testConf))))
 
   def this(s: String) = this(ConfigFactory.parseString(s))
@@ -65,32 +74,47 @@ abstract class AkkaSpec(_system: ActorSystem)
 
   val log: LoggingAdapter = Logging(system, this.getClass)
 
-  final override def beforeAll {
-    startCoroner
+  override val invokeBeforeAllAndAfterAllEvenIfNoTestsAreExpected = true
+
+  final override def beforeAll: Unit = {
+    startCoroner()
     atStartup()
   }
 
-  final override def afterAll {
+  final override def afterAll: Unit = {
     beforeTermination()
-    system.shutdown()
-    try system.awaitTermination(5 seconds) catch {
-      case _: TimeoutException ⇒
-        system.log.warning("Failed to stop [{}] within 5 seconds", system.name)
-        println(system.asInstanceOf[ActorSystemImpl].printTree)
-    }
+    shutdown()
     afterTermination()
     stopCoroner()
   }
 
-  protected def atStartup() {}
+  protected def atStartup(): Unit = {}
 
-  protected def beforeTermination() {}
+  protected def beforeTermination(): Unit = {}
 
-  protected def afterTermination() {}
+  protected def afterTermination(): Unit = {}
 
   def spawn(dispatcherId: String = Dispatchers.DefaultDispatcherId)(body: ⇒ Unit): Unit =
     Future(body)(system.dispatchers.lookup(dispatcherId))
 
   override def expectedTestDuration: FiniteDuration = 60 seconds
 
+  def muteDeadLetters(messageClasses: Class[_]*)(sys: ActorSystem = system): Unit =
+    if (!sys.log.isDebugEnabled) {
+      def mute(clazz: Class[_]): Unit =
+        sys.eventStream.publish(Mute(DeadLettersFilter(clazz)(occurrences = Int.MaxValue)))
+      if (messageClasses.isEmpty) mute(classOf[AnyRef])
+      else messageClasses foreach mute
+    }
+
+  // for ScalaTest === compare of Class objects
+  implicit def classEqualityConstraint[A, B]: CanEqual[Class[A], Class[B]] =
+    new CanEqual[Class[A], Class[B]] {
+      def areEqual(a: Class[A], b: Class[B]) = a == b
+    }
+
+  implicit def setEqualityConstraint[A, T <: Set[_ <: A]]: CanEqual[Set[A], T] =
+    new CanEqual[Set[A], T] {
+      def areEqual(a: Set[A], b: T) = a == b
+    }
 }

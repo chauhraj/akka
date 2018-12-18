@@ -1,20 +1,22 @@
-/**
- *    Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+/*
+ * Copyright (C) 2009-2018 Lightbend Inc. <https://www.lightbend.com>
  */
 
 package akka.dispatch
 
-import akka.actor.{ ActorCell, ActorRef }
+import akka.actor.ActorCell
 import akka.dispatch.sysmsg._
 import scala.annotation.tailrec
 import scala.concurrent.duration.Duration
 import akka.util.Helpers
 import java.util.{ Comparator, Iterator }
-import java.util.concurrent.{ Executor, LinkedBlockingQueue, ConcurrentLinkedQueue, ConcurrentSkipListSet }
+import java.util.concurrent.ConcurrentSkipListSet
 import akka.actor.ActorSystemImpl
 import scala.concurrent.duration.FiniteDuration
 
 /**
+ * INTERNAL API: Use `BalancingPool` instead of this dispatcher directly.
+ *
  * An executor based event driven dispatcher which will try to redistribute work from busy actors to idle actors. It is assumed
  * that all actors using the same instance of this dispatcher can process all messages that have been sent to one of the actors. I.e. the
  * actors belong to a pool of actors, and to the client there is no guarantee about which actor instance actually processes a given message.
@@ -28,17 +30,17 @@ import scala.concurrent.duration.FiniteDuration
  * @see akka.dispatch.BalancingDispatcher
  * @see akka.dispatch.Dispatchers
  */
-class BalancingDispatcher(
-  _prerequisites: DispatcherPrerequisites,
-  _id: String,
-  throughput: Int,
-  throughputDeadlineTime: Duration,
-  mailboxType: MailboxType,
-  _mailBoxTypeConfigured: Boolean,
+@deprecated("Use BalancingPool instead of BalancingDispatcher", "2.3")
+private[akka] class BalancingDispatcher(
+  _configurator:                   MessageDispatcherConfigurator,
+  _id:                             String,
+  throughput:                      Int,
+  throughputDeadlineTime:          Duration,
+  _mailboxType:                    MailboxType,
   _executorServiceFactoryProvider: ExecutorServiceFactoryProvider,
-  _shutdownTimeout: FiniteDuration,
-  attemptTeamWork: Boolean)
-  extends Dispatcher(_prerequisites, _id, throughput, throughputDeadlineTime, mailboxType, _mailBoxTypeConfigured, _executorServiceFactoryProvider, _shutdownTimeout) {
+  _shutdownTimeout:                FiniteDuration,
+  attemptTeamWork:                 Boolean)
+  extends Dispatcher(_configurator, _id, throughput, throughputDeadlineTime, _executorServiceFactoryProvider, _shutdownTimeout) {
 
   /**
    * INTERNAL API
@@ -51,12 +53,12 @@ class BalancingDispatcher(
   /**
    * INTERNAL API
    */
-  private[akka] val messageQueue: MessageQueue = mailboxType.create(None, None)
+  private[akka] val messageQueue: MessageQueue = _mailboxType.create(None, None)
 
   private class SharingMailbox(val system: ActorSystemImpl, _messageQueue: MessageQueue)
     extends Mailbox(_messageQueue) with DefaultSystemMessageQueue {
     override def cleanUp(): Unit = {
-      val dlq = system.deadLetterMailbox
+      val dlq = mailboxes.deadLetterMailbox
       //Don't call the original implementation of this since it scraps all messages, and we don't want to do that
       var messages = systemDrain(new LatestFirstSystemMessageList(NoMessage))
       while (messages.nonEmpty) {
@@ -69,7 +71,8 @@ class BalancingDispatcher(
     }
   }
 
-  protected[akka] override def createMailbox(actor: akka.actor.Cell): Mailbox = new SharingMailbox(actor.systemImpl, messageQueue)
+  protected[akka] override def createMailbox(actor: akka.actor.Cell, mailboxType: MailboxType): Mailbox =
+    new SharingMailbox(actor.systemImpl, messageQueue)
 
   protected[akka] override def register(actor: ActorCell): Unit = {
     super.register(actor)
@@ -94,7 +97,7 @@ class BalancingDispatcher(
           && i.hasNext
           && (executorService.executor match {
             case lm: LoadMetrics ⇒ lm.atFullThrottle == false
-            case other           ⇒ true
+            case _               ⇒ true
           })
           && !registerForExecution(i.next.mailbox, false, false))
           scheduleOne(i)
